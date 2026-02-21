@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+venv/
+
+# Secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Data & models (tracked by DVC, not Git)
+data/raw/
+data/processed/
+data/features/
+models/
+artifacts/
+external/
+reports/
+
+# Caches
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Database
+*.db
+*.db-journal
+
+# MLflow local runs
+mlruns/
+mlruns.db
+
+# Misc
+*.log
+*.bak
