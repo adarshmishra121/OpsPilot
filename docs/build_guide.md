@@ -12,7 +12,7 @@
 | Phase 2: API Skeleton + Observability | Steps 6-10 | ✅ Complete | `feat: add API skeleton with schemas, health check, and observability` |
 | Phase 3: Data Download Scripts | Step 11 | ✅ Complete | (batched with Phase 4) |
 | Phase 4: RAG Pipeline | Steps 12-19 | ✅ Complete | `feat: add data pipeline, embeddings, and hybrid RAG retriever` |
-| Phase 5: Anomaly Detection | Steps 20-25 | ⬜ Not started | |
+| Phase 5: Anomaly Detection | Steps 20-25 | ✅ Complete | `feat: add anomaly detection pipeline with Drain3, IsolationForest, and MLflow` |
 | Phase 6: Storage (SQL + Feedback) | Steps 26-28 | ⬜ Not started | |
 | Phase 7: Agent Orchestration | Steps 29-33 | ⬜ Not started | |
 | Phase 8: Auth + Admin | Steps 34-35 | ⬜ Not started | |
@@ -819,15 +819,227 @@ The retriever asks FAISS and BM25 for `top_k * 2 = 12` results each, then fuses 
 
 ---
 
-# REMAINING STEPS (Quick Reference)
+# PHASE 5: Anomaly Detection Pipeline
 
-## Phase 5: Anomaly Detection Pipeline
-- **Step 20**: `scripts/features/parse_logs.py` — Drain3 template mining from HDFS logs → parquet
-- **Step 21**: `scripts/features/build_features.py` — windowed template frequency vectors + vocab
-- **Step 22**: `scripts/train/train_anomaly.py` — IsolationForest + MLflow logging
-- **Step 23**: `src/opspilot/anomaly/features.py` — online Drain3 featurizer for API
-- **Step 24**: `src/opspilot/anomaly/infer.py` — IsolationForest anomaly scorer
-- **Step 25**: `src/opspilot/api/routes/anomaly.py` — POST /anomaly/score
+---
+
+## How the Anomaly Pipeline Works — The Big Picture
+
+```
+OFFLINE (run once to train):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HDFS.log → [parse_logs.py] → templates.parquet → [build_features.py] → features.parquet + vocab.json
+                                                                              │
+                                                                              ▼
+                                                                    [train_anomaly.py]
+                                                                         │        │
+                                                                  model.pkl    MLflow logs
+
+ONLINE (every API request):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+POST /anomaly/score {log_lines: [...]} → [features.py] → feature vector → [infer.py] → score 0-1
+                                         (uses same vocab.json)            (uses same model.pkl)
+```
+
+The critical connection is the **shared vocabulary** (`anomaly_vocab.json`). Both offline and online pipelines use it to ensure feature vector positions match.
+
+---
+
+## Step 20: `scripts/features/parse_logs.py`
+
+### What
+
+Reads raw HDFS log lines, runs each through Drain3, outputs a parquet table of `(line, cluster_id, template)`.
+
+### How Drain3 processes logs
+
+```
+Input:  "081109 203615 148 INFO dfs.DataNode: Receiving block blk_123 src: /10.250.19.102"
+Drain3:  cluster_id=1, template="INFO dfs.DataNode: Receiving block <*> src: <*>"
+
+Input:  "081109 203615 149 INFO dfs.DataNode: Receiving block blk_456 src: /10.250.19.103"
+Drain3:  cluster_id=1, template="INFO dfs.DataNode: Receiving block <*> src: <*>"
+         ↑ Same template! Block ID and IP are just variables (<*>)
+```
+
+### Key design decisions
+
+1. **Parquet output** — 10x smaller than CSV, columnar access, industry standard
+2. **`MAX_LINES = 500000`** — full HDFS has 11M+ lines, 500K is enough for training
+3. **`errors="replace"`** — handles corrupted encoding in real log files
+4. **`drain3.ini` config** — masking replaces numbers→NUM, hex→HEX before parsing
+
+---
+
+## Step 21: `scripts/features/build_features.py`
+
+### What
+
+Converts parsed templates into **feature vectors** — lists of numbers the ML model can learn from.
+
+### How template counting works
+
+```
+Drain3 found 300 unique templates: T1="disk full", T2="user login", T3="block received", ...
+
+Window 1 (lines 0-499):                    Window 2 (lines 500-999):
+  T1 appeared 2 times                        T1 appeared 0 times
+  T2 appeared 45 times                       T2 appeared 50 times
+  T3 appeared 120 times                      T3 appeared 0 times (!!!) ← unusual!
+  → vec: [2, 45, 120, 0, 0, ...]             → vec: [0, 50, 0, 0, 0, ...]
+                                                     ↑ IsolationForest will flag this
+```
+
+### What is the vocabulary?
+
+Not all 300+ templates are useful. The **vocabulary** is the top 300 most frequent templates. We save this to `artifacts/anomaly_vocab.json`. The online featurizer (Step 23) loads the SAME vocab to produce matching vectors.
+
+### Why window size = 500 lines?
+
+Too small (10 lines) → mostly zeros, noisy. Too large (10000 lines) → anomalies hidden in average. 500 lines ≈ a 5-minute window in a busy system.
+
+---
+
+## Step 22: `scripts/train/train_anomaly.py`
+
+### What
+
+Trains IsolationForest on feature vectors and logs everything to MLflow.
+
+### How IsolationForest works (visual)
+
+```
+Normal data (clustered):              Anomalous data (isolated):
+  ● ● ●                                    ○
+  ● ● ● ●     Takes MANY random                Takes VERY FEW random
+  ● ● ●       splits to isolate one             splits to isolate
+               = deep in tree = NORMAL           = shallow in tree = ANOMALOUS
+```
+
+Key insight: anomalies are rare and different → easy to isolate. Normal points are clustered → hard to isolate. Isolation depth = anomaly score.
+
+### Key parameters
+
+| Parameter | Value | Why |
+|-----------|-------|-----|
+| `n_estimators` | 150 | Number of trees. More = better but slower. 150 is a good balance. |
+| `contamination` | 0.01 | Expect ~1% anomalies. Conservative — avoids flooding with false alarms. |
+| `random_state` | 42 | Reproducible results across runs. |
+| `n_jobs` | -1 | Use all CPU cores for parallel training. |
+
+### What MLflow tracks
+
+```python
+mlflow.log_params({...})    → hyperparameters (n_estimators, contamination, etc.)
+mlflow.log_metrics({...})   → train_time, mean_score, std_score, anomaly_pct
+mlflow.log_artifact(...)    → the trained model.pkl file itself
+```
+
+Later you can compare experiments in the MLflow UI:
+"Did 200 trees with 0.02 contamination perform better than 150 trees with 0.01?"
+
+### Output
+
+`models/anomaly_model.pkl` — serialised IsolationForest, ~5MB, loads in <1s.
+
+---
+
+## Step 23: `src/opspilot/anomaly/features.py`
+
+### What
+
+The **online featurizer** — real-time version of `build_features.py`. Converts raw log lines from API requests into feature vectors.
+
+### Offline vs Online comparison
+
+| | Offline (`build_features.py`) | Online (`features.py`) |
+|---|---|---|
+| Input | Millions of lines from parquet | 10-100 lines from API request |
+| Vocab | Builds from scratch | Loads from `anomaly_vocab.json` |
+| Output | Saves features to parquet | Returns vector in memory |
+| When | Once during training | Every API request |
+| Speed | Minutes | Milliseconds |
+
+### Why vocab consistency is critical
+
+If offline vocab says position #0 = template "disk full", the online featurizer MUST also put "disk full" counts at position #0. Otherwise the model sees data in wrong slots → meaningless scores.
+
+Both load the same `artifacts/anomaly_vocab.json` → guaranteed consistency.
+
+### Extra output: top_templates
+
+Besides the feature vector, it returns the 5 most common templates found. This gives the on-call engineer human-readable context: "Your logs are dominated by 'disk full' and 'connection timeout' patterns."
+
+---
+
+## Step 24: `src/opspilot/anomaly/infer.py`
+
+### What
+
+Loads the trained model and scores feature vectors. The main function `score_logs()` is the single entry point.
+
+### Score normalization explained
+
+```
+sklearn's decision_function output:
+  +0.3  = very normal
+   0.0  = borderline
+  -0.3  = very anomalous
+
+Our normalization (0.5 - raw):
+  +0.3 → 0.2  (normal)
+   0.0 → 0.5  (borderline)
+  -0.3 → 0.8  (anomalous)
+
+Clamped to [0, 1]: score = max(0, min(1, 0.5 - raw))
+```
+
+Now engineers see intuitive numbers: 0.0 = fine, 1.0 = red alert.
+
+### Return format
+
+```python
+{
+    "score": 0.65,              # 0-1 anomaly score
+    "top_templates": [...],     # Human-readable template list
+    "details": {
+        "raw_isolation_score": -0.15,   # For debugging
+        "n_lines": 50,
+        "n_features": 300
+    }
+}
+```
+
+---
+
+## Step 25: `src/opspilot/api/routes/anomaly.py`
+
+### What
+
+`POST /anomaly/score` endpoint — thinnest route handler in the project (15 lines).
+
+### Full request lifecycle
+
+```
+POST /anomaly/score  {"log_lines": ["ERROR disk full ...", "WARN timeout ...", ...]}
+    │
+    ▼
+anomaly.py route handler (THIS FILE — 3 lines of logic)
+    │
+    ├── Validates input with Pydantic (AnomalyScoreRequest)
+    ├── Calls infer.score_logs(req.log_lines)
+    │       ├── LogFeaturizer.featurize(lines) → vector + templates
+    │       └── IsolationForest.decision_function(vec) → normalized score
+    └── Returns AnomalyReport(score=0.65, top_templates=[...], details={...})
+```
+
+### Thin controller pattern
+
+The route ONLY does: validate input → call service → return response. All ML logic lives in `infer.py` → `features.py`. This is clean separation — routes are easy to test, ML code is reusable.
+
+---
+
+# REMAINING STEPS (Quick Reference)
 
 ## Phase 6: Storage
 - **Step 26**: `src/opspilot/storage/db.py` — SQLModel engine + session
