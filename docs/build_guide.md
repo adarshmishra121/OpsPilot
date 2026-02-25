@@ -11,7 +11,7 @@
 | Phase 1: Foundation & Scaffolding | Steps 1-5 | ✅ Complete | `feat: scaffold project structure, configs, and Docker stack` |
 | Phase 2: API Skeleton + Observability | Steps 6-10 | ✅ Complete | `feat: add API skeleton with schemas, health check, and observability` |
 | Phase 3: Data Download Scripts | Step 11 | ✅ Complete | (batched with Phase 4) |
-| Phase 4: RAG Pipeline | Steps 12-17 | 🔄 Step 17 done, Steps 18-19 remaining | |
+| Phase 4: RAG Pipeline | Steps 12-19 | ✅ Complete | `feat: add data pipeline, embeddings, and hybrid RAG retriever` |
 | Phase 5: Anomaly Detection | Steps 20-25 | ⬜ Not started | |
 | Phase 6: Storage (SQL + Feedback) | Steps 26-28 | ⬜ Not started | |
 | Phase 7: Agent Orchestration | Steps 29-33 | ⬜ Not started | |
@@ -735,11 +735,91 @@ Final ranking: [doc_1, doc_2, doc_3, doc_4, doc_5]
 
 ---
 
-# REMAINING STEPS (Quick Reference)
+## Step 18: `scripts/rag/build_index.py`
 
-## Phase 4 remaining
-- **Step 18**: `scripts/rag/build_index.py` — reads runbook .md files, chunks, builds FAISS index
-- **Step 19**: `src/opspilot/api/routes/rag.py` — POST /rag/search endpoint
+### What
+
+Offline script that builds the FAISS vector index from runbook markdown files. You run it once (or whenever runbooks change) with `make index`.
+
+### How the full pipeline flows
+
+```
+data/raw/runbooks/*.md
+    │
+    ├── For each .md file:
+    │   ├── Read full text
+    │   ├── Extract title from filename (e.g., "NodeDiskRunningFull")
+    │   ├── Chunk into ~900-word pieces (chunking.py)
+    │   └── Create metadata: doc_id, title, section, checksum
+    │
+    ├── All chunks collected into one list
+    │
+    ├── FaissStore.build(docs):
+    │   ├── Embedder.encode(all texts) → N×384 matrix
+    │   ├── faiss.IndexFlatIP.add(vectors)
+    │   ├── Write index.faiss (binary vectors)
+    │   └── Write meta.jsonl (one JSON per line)
+    │
+    └── Output: artifacts/vector_index/
+            ├── index.faiss   ← vector data
+            └── meta.jsonl    ← document metadata
+```
+
+### Key design decisions
+
+1. **`doc_id = f"runbook:{title}:{i}"`** — unique ID per chunk. Format: `runbook:NodeDiskRunningFull:0`, `runbook:NodeDiskRunningFull:1`, etc.
+2. **SHA-256 checksum** per chunk — detects stale indexes (if checksum changes, runbook was updated)
+3. **Sorted file processing** (`sorted(md_files)`) — deterministic order so the same input always produces the same index
+4. **Raises RuntimeError if no .md files** — fail loud, not silent
+
+### How it connects to the Makefile
+
+```bash
+make index  →  python scripts/rag/build_index.py
+```
+
+---
+
+## Step 19: `src/opspilot/api/routes/rag.py`
+
+### What
+
+The `POST /rag/search` REST endpoint. Accepts a query, runs hybrid retrieval, returns ranked runbook chunks.
+
+### Full request/response lifecycle
+
+```
+POST /rag/search
+  Body: {"query": "disk full on node", "top_k": 6}
+    │
+    ▼
+rag.py route handler
+    │
+    ├── _get_retriever() [cached with @lru_cache]
+    │   ├── FaissStore(INDEX_PATH).load()   ← reads index.faiss + meta.jsonl
+    │   ├── DocStore(META_PATH)              ← reads meta.jsonl into memory
+    │   └── HybridRetriever(store, docstore) ← builds BM25 index from docstore texts
+    │
+    ├── retriever.retrieve(query, top_k=6)
+    │   ├── FAISS: encode query → vector search → top 12 semantic matches
+    │   ├── BM25: keyword score → top 12 lexical matches
+    │   ├── Normalize both score sets to [0, 1]
+    │   └── Fuse: 0.6 × vector + 0.4 × bm25 → top 6 final results
+    │
+    └── Return: {"chunks": [{doc_id, title, text, score}, ...]}
+```
+
+### Why `@lru_cache` on `_get_retriever()`
+
+Loading the FAISS index + embedding model takes 2-3 seconds. Without caching, every API request would re-load everything. `@lru_cache` means: load once on first request, reuse the same object forever after. This is a common singleton pattern in FastAPI.
+
+### Why fetch `top_k * 2` from each source
+
+The retriever asks FAISS and BM25 for `top_k * 2 = 12` results each, then fuses and returns only `top_k = 6`. This ensures enough candidates survive the fusion step — if we only fetched 6 from each, some good results might get lost after score normalization.
+
+---
+
+# REMAINING STEPS (Quick Reference)
 
 ## Phase 5: Anomaly Detection Pipeline
 - **Step 20**: `scripts/features/parse_logs.py` — Drain3 template mining from HDFS logs → parquet
@@ -756,7 +836,7 @@ Final ranking: [doc_1, doc_2, doc_3, doc_4, doc_5]
 
 ## Phase 7: Agent Orchestration (LangGraph)
 - **Step 29**: `src/opspilot/agent/prompts.py` — system prompt enforcing JSON + evidence
-- **Step 30**: `src/opspilot/agent/safety.py` — validate_grounded_actions (reject actionswithout evidence)
+- **Step 30**: `src/opspilot/agent/safety.py` — validate_grounded_actions (reject actions without evidence)
 - **Step 31**: `src/opspilot/agent/tools.py` — tool functions (retrieve, anomaly_score)
 - **Step 32**: `src/opspilot/agent/graph.py` — LangGraph state machine: parse→anomaly→retrieve→draft→done
 - **Step 33**: `src/opspilot/api/routes/incident.py` — POST /incident/analyze
