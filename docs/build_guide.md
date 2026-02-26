@@ -13,7 +13,7 @@
 | Phase 3: Data Download Scripts | Step 11 | ✅ Complete | (batched with Phase 4) |
 | Phase 4: RAG Pipeline | Steps 12-19 | ✅ Complete | `feat: add data pipeline, embeddings, and hybrid RAG retriever` |
 | Phase 5: Anomaly Detection | Steps 20-25 | ✅ Complete | `feat: add anomaly detection pipeline with Drain3, IsolationForest, and MLflow` |
-| Phase 6: Storage (SQL + Feedback) | Steps 26-28 | ⬜ Not started | |
+| Phase 6: Storage (SQL + Feedback) | Steps 26-28 | ✅ Complete | `feat: add database storage and feedback endpoint` |
 | Phase 7: Agent Orchestration | Steps 29-33 | ⬜ Not started | |
 | Phase 8: Auth + Admin | Steps 34-35 | ⬜ Not started | |
 | Phase 9: Streamlit UI | Step 36 | ⬜ Not started | |
@@ -1039,12 +1039,125 @@ The route ONLY does: validate input → call service → return response. All ML
 
 ---
 
-# REMAINING STEPS (Quick Reference)
+# PHASE 6: Storage (SQL + Feedback)
 
-## Phase 6: Storage
-- **Step 26**: `src/opspilot/storage/db.py` — SQLModel engine + session
-- **Step 27**: `src/opspilot/storage/models.py` — Feedback table model
-- **Step 28**: `src/opspilot/api/routes/feedback.py` — POST /feedback
+---
+
+## Step 26: `src/opspilot/storage/db.py`
+
+### What
+
+Sets up the database connection using SQLModel. Works with SQLite (local dev) or PostgreSQL (Docker).
+
+### Engine vs Session (restaurant analogy)
+
+```
+Engine = connection to the kitchen (database). Created once, shared by everyone.
+Session = one order ticket. Open it, do queries, close it.
+
+engine = create_engine(DATABASE_URL)  # Connect to kitchen (once at startup)
+
+with Session(engine) as session:      # Open order ticket
+    session.add(feedback)             # Write an order
+    session.commit()                  # Send to kitchen
+    # ticket auto-closes
+```
+
+### How `get_session()` works with FastAPI
+
+```python
+def get_session():
+    with Session(engine) as session:
+        yield session    # ← give session to route handler
+    # ← auto-closes after route finishes
+```
+
+`yield` makes this a generator. FastAPI's `Depends()` calls it, gives the session to the route, then cleans up. In tests, you swap in a fake session pointing to a test database.
+
+### SQLite vs PostgreSQL
+
+| | SQLite | PostgreSQL |
+|---|---|---|
+| Setup | Zero (single file) | Docker container |
+| Concurrency | One writer at a time | Many concurrent writers |
+| When | Local development | Docker / production |
+| Switch | `DATABASE_URL=sqlite:///./opspilot.db` | `DATABASE_URL=postgresql+psycopg://...` |
+
+---
+
+## Step 27: `src/opspilot/storage/models.py`
+
+### What
+
+Defines the `FeedbackRow` database table using SQLModel.
+
+### How SQLModel maps Python to SQL
+
+```python
+class FeedbackRow(SQLModel, table=True):        # Python class
+    id: int | None = Field(primary_key=True)     # → id INTEGER PRIMARY KEY
+    incident_id: str = Field(index=True)         # → incident_id TEXT + INDEX
+    helpful: bool                                 # → helpful BOOLEAN
+    tags: List[str] = Field(sa_column=Column(JSON))  # → tags JSON
+    comment: Optional[str] = None                 # → comment TEXT NULL
+    created_at: datetime                          # → created_at TIMESTAMP
+```
+
+### Design decisions
+
+- **`index=True` on `incident_id`** — fast lookups by incident (O(log n) vs O(n))
+- **`sa_column=Column(JSON)` for tags** — SQLite doesn't support arrays, so we store as JSON string
+- **`created_at` with UTC** — always store in UTC, convert for display
+
+### Why store feedback
+
+1. **Improvement signal** — if 80% of disk-full analyses are "not helpful," runbooks need updating
+2. **Quality dashboard** — helpful % over time
+3. **Future fine-tuning** — human-labeled data for model training
+4. **Audit trail** — what did the system recommend?
+
+---
+
+## Step 28: `src/opspilot/api/routes/feedback.py`
+
+### What
+
+`POST /feedback` endpoint with FastAPI dependency injection.
+
+### Full request lifecycle
+
+```
+POST /feedback  {"incident_id": "INC-42", "helpful": true, "tags": ["fast"], "comment": "Spot on!"}
+    │
+    ▼
+feedback.py route handler
+    │
+    ├── Pydantic validates input (FeedbackRequest)
+    ├── Depends(get_session) injects a database session
+    ├── Create FeedbackRow from request data
+    ├── session.add(row)       ← stage the insert
+    ├── session.commit()       ← write to database
+    ├── session.refresh(row)   ← reload to get auto-generated id
+    └── Return: {"id": 7, "status": "saved"}
+```
+
+### Why `session.refresh(row)`
+
+After `commit()`, the database auto-generates the `id` (primary key). Python doesn't know the `id` yet. `refresh(row)` re-reads from database so `row.id` is populated for the response.
+
+### Dependency injection pattern
+
+```python
+def submit_feedback(req: FeedbackRequest, session: Session = Depends(get_session)):
+#                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#                   FastAPI calls get_session(), passes result as `session`
+#                   Route handler doesn't create its own session
+#                   In tests, you inject a fake session
+```
+
+---
+
+# REMAINING STEPS (Quick Reference)
 
 ## Phase 7: Agent Orchestration (LangGraph)
 - **Step 29**: `src/opspilot/agent/prompts.py` — system prompt enforcing JSON + evidence
