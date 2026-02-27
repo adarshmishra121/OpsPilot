@@ -14,7 +14,7 @@
 | Phase 4: RAG Pipeline | Steps 12-19 | ✅ Complete | `feat: add data pipeline, embeddings, and hybrid RAG retriever` |
 | Phase 5: Anomaly Detection | Steps 20-25 | ✅ Complete | `feat: add anomaly detection pipeline with Drain3, IsolationForest, and MLflow` |
 | Phase 6: Storage (SQL + Feedback) | Steps 26-28 | ✅ Complete | `feat: add database storage and feedback endpoint` |
-| Phase 7: Agent Orchestration | Steps 29-33 | ⬜ Not started | |
+| Phase 7: Agent Orchestration | Steps 29-33 | ✅ Complete | `feat: add LangGraph agent with safety validation and incident endpoint` |
 | Phase 8: Auth + Admin | Steps 34-35 | ⬜ Not started | |
 | Phase 9: Streamlit UI | Step 36 | ⬜ Not started | |
 | Phase 10: Evaluation + DVC | Steps 37-39 | ⬜ Not started | |
@@ -55,6 +55,14 @@ Created the entire folder tree (25+ directories) and 10 empty `__init__.py` file
 - `__init__.py` files tell Python: "this folder is a package, you can import from it"
 - Without `__init__.py`, `from opspilot.api.main import app` would fail with `ModuleNotFoundError`
 - Having the full skeleton upfront means no surprises later
+
+### Interview Q&A
+
+> **Q: Why `src/opspilot/` layout instead of just `opspilot/` at root?**
+> A: "The `src/` layout prevents accidental imports from the working directory. Without it, Python might import the local folder instead of the installed package. The `src/` layout forces you to install the package properly, catching import issues early."
+
+> **Q: Why create all directories upfront instead of as needed?**
+> A: "Two reasons: (1) it documents the full architecture before writing any code — you can review the structure in a PR. (2) It prevents merge conflicts — if two developers independently create the same directory, git has nothing to merge."
 
 ### Full Structure
 ```
@@ -174,6 +182,14 @@ This tells pip: "When someone does `from opspilot.api.main import app`, look ins
 ### Version pinning with `^`
 `"^0.112.0"` means "at least 0.112.0, up to (but not including) the next major version." This prevents breaking changes while allowing patches.
 
+### Interview Q&A
+
+> **Q: Why use `pyproject.toml` instead of `requirements.txt`?**
+> A: "`pyproject.toml` is the modern standard (PEP 621). It replaces `setup.py`, `setup.cfg`, and `requirements.txt` in a single file. It defines project metadata, dependencies, build system, and tool config (ruff, mypy) all in one place. `requirements.txt` only lists dependencies — no metadata, no build config."
+
+> **Q: Why editable install (`pip install -e .`)?**
+> A: "Editable mode means Python uses your source files directly instead of copying them to site-packages. When you edit `src/opspilot/api/main.py`, the changes take effect immediately — no reinstall needed. Essential for development."
+
 ---
 
 ## Step 3: `.env.example` + `.gitignore` + `Makefile`
@@ -195,6 +211,14 @@ This tells pip: "When someone does `from opspilot.api.main import app`, look ins
 ### `.gitignore` — What NOT to commit
 
 Key entries: `.env` (secrets), `data/raw/` (DVC-tracked), `models/` (large binaries), `__pycache__/` (generated), `mlruns/` (use MLflow server).
+
+### Interview Q&A for `.env.example`
+
+> **Q: Why `.env.example` instead of just `.env`?**
+> A: "`.env` contains real secrets (API keys, passwords) and is gitignored. `.env.example` is committed to git and shows every variable with safe defaults. New developers copy it: `cp .env.example .env` and fill in their values. This way the repo documents all required config without exposing secrets."
+
+> **Q: Why `LLM_PROVIDER=mock` as default?**
+> A: "Mock mode means the system works without downloading a 2GB LLM model. Tests run fast, CI/CD works without GPU, and new developers can start immediately. Flip to `ollama` when you want real LLM responses."
 
 ### `Makefile` — Developer shortcuts
 
@@ -253,6 +277,17 @@ COPY src /app/src                         # Step 3: Copy code (changes often)
 ```
 If you only change source code, Docker reuses the cached pip install layer → **fast rebuilds**.
 
+### Interview Q&A for Docker
+
+> **Q: Why Docker Compose and not just run things locally?**
+> A: "Docker Compose gives reproducible environments. Every developer and CI server gets identical Postgres, Redis, Prometheus versions. No 'works on my machine' issues. One command (`docker compose up`) starts 8 services with correct networking."
+
+> **Q: How do services communicate inside Docker Compose?**
+> A: "Docker Compose creates a virtual network. Services find each other by name, not IP. So the API connects to `postgres:5432` not `localhost:5432`. This is automatic — no manual network config needed."
+
+> **Q: Why separate Dockerfiles for API and UI?**
+> A: "They have different base images and dependencies. The API needs Python with ML libraries. The UI needs Python with Streamlit. Separate images are smaller and faster to build. Also, in production, they scale independently — you might need 5 API replicas but only 1 UI."
+
 ### `docker/prometheus.yml` — Scrape config
 
 Tells Prometheus: "Every 10 seconds, call GET http://api:8000/metrics and store the data."
@@ -309,6 +344,14 @@ Raw Logs → [Drain3] → Template IDs → [Count per 5-min window] → Feature 
 | `extra_delimiters` | `_-/.` | Also split words on these (not just spaces) |
 
 **Why masking matters**: Without masking, "port 8080" and "port 3000" would be different templates. With masking, both become "port NUM" → same template. Reduces noise dramatically.
+
+### Interview Q&A for Drain3
+
+> **Q: Why Drain3 instead of regex?**
+> A: "Regex requires you to know the log format upfront. Drain3 is unsupervised — it discovers patterns automatically from raw logs. New log patterns get new templates without any manual work. This is critical in production where log formats evolve."
+
+> **Q: What is `sim_th = 0.4`?**
+> A: "The similarity threshold. When a new log line arrives, Drain3 compares it against existing templates. If >40% of tokens match, it merges into that template. Lower threshold = fewer templates (more aggressive merging). Higher = more templates (more granular)."
 
 ---
 
@@ -373,6 +416,14 @@ uvicorn opspilot.api.main:app
 ```
 Uvicorn imports `opspilot.api.main`, finds the `app` variable, and starts serving it.
 
+### Interview Q&A for FastAPI
+
+> **Q: Why FastAPI instead of Flask or Django?**
+> A: "FastAPI gives us three things Flask doesn't: (1) automatic Swagger docs from Pydantic schemas, (2) async support out of the box, (3) built-in request validation. Django is too heavy for a microservice — we don't need its ORM, admin panel, or template engine."
+
+> **Q: What is ASGI vs WSGI?**
+> A: "WSGI (Flask/Django) processes one request at a time per worker. ASGI (FastAPI/uvicorn) can handle many concurrent requests with async. For an API that calls external services (LLM, database), ASGI is much more efficient."
+
 ---
 
 ## Step 7: `src/opspilot/api/schemas.py`
@@ -426,6 +477,18 @@ If someone sends `{"incident_id": 123}` (number instead of string), Pydantic eit
 log_lines: List[str] = Field(default_factory=list)
 ```
 If the user doesn't send `log_lines`, default to `[]`. Using `default_factory=list` (not `default=[]`) because mutable defaults are a classic Python bug — all instances would share the SAME list!
+
+### How schemas connect to Swagger docs
+
+FastAPI auto-generates interactive API docs at `http://localhost:8000/docs`. Every Pydantic model becomes a form you can fill in and test. Class docstrings appear as descriptions. This is why we add docstrings to every model — they populate Swagger.
+
+### Interview Q&A for Pydantic
+
+> **Q: Why Pydantic instead of manual validation?**
+> A: "Manual validation means scattered `if` checks that are easy to miss. Pydantic centralizes validation in one place — the schema. If a field is missing or wrong type, you get a clear 422 error with the exact field name. Plus, it auto-generates OpenAPI docs."
+
+> **Q: What's the difference between Pydantic and dataclasses?**
+> A: "Dataclasses are Python's built-in data containers — no validation. Pydantic adds runtime type checking, JSON serialization, and default value handling. For an API, you need Pydantic because you can't trust client input."
 
 ---
 
@@ -497,6 +560,17 @@ Exposes GET /metrics  ←───  Scrapes every 10s    ───────�
 
 Health checks happen every 10 seconds per container. With 8 containers, that's 48 health checks/minute → floods metrics with noise, making real API trends invisible.
 
+### Interview Q&A for Observability
+
+> **Q: Why structured logging + Prometheus? Isn't one enough?**
+> A: "They serve different purposes. Logs capture individual events for debugging ('request X failed because Y'). Metrics capture aggregate trends ('error rate jumped 5x in the last minute'). You need both: metrics to detect problems, logs to diagnose them."
+
+> **Q: How would you add a custom metric?**
+> A: "Create a Prometheus Counter or Histogram, increment it in code (`counter.inc()`), and it appears at `/metrics` automatically. For example, `rag_queries_total` counts search requests. No config changes needed — Prometheus discovers it."
+
+> **Q: What's the difference between a Counter, Gauge, and Histogram?**
+> A: "Counter only goes up (request count). Gauge goes up and down (active connections). Histogram tracks distributions (request latency in buckets like <10ms, <50ms, <100ms). We use Histogram for latency."
+
 ---
 
 # PHASE 3: Data Download Scripts
@@ -530,6 +604,14 @@ scripts/data/download_all.py
 2. **`ensure_repo()`** — idempotent: clones first time, pulls updates after
 3. **`external/` vs `data/raw/`** — external is gitignored temp storage, data/raw is DVC-tracked versioned data
 4. **`Path(__file__).resolve().parents[2]`** — gets project root regardless of where you run the script from
+
+### Interview Q&A for Data Pipeline
+
+> **Q: Why download via Git clone instead of wget/curl?**
+> A: "Git clone gives us version tracking. `ensure_repo()` does `git pull` on subsequent runs, so we always get the latest runbooks. With wget, we'd need to re-download everything each time and have no way to track changes."
+
+> **Q: Why DVC for data versioning instead of committing data to Git?**
+> A: "Git stores full copies of every version. A 2GB log file with 10 versions would bloat the repo to 20GB. DVC stores data on cheap storage (S3, local disk) and only commits a tiny `.dvc` file to Git. This keeps the repo small while maintaining full version history."
 
 ---
 
@@ -607,6 +689,17 @@ Makes all vectors length 1.0. After normalization:
 - So normalized vectors + IP = cosine similarity search
 
 This is a standard trick in information retrieval.
+
+### Interview Q&A for Embeddings
+
+> **Q: What is an embedding?**
+> A: "A fixed-size vector of numbers that captures the semantic meaning of text. Similar texts have similar vectors. This lets us find relevant documents without exact keyword matching — 'disk full' matches 'storage capacity exhausted' because their vectors are close."
+
+> **Q: Why all-MiniLM-L6-v2 instead of OpenAI embeddings?**
+> A: "Three reasons: (1) Free and open-source — no API costs. (2) Runs locally on CPU — no data leaves our network. (3) 80MB model with 384 dimensions is plenty for our ~1000-chunk corpus. OpenAI is better for huge corpora, but overkill for us."
+
+> **Q: Why cache embeddings on disk?**
+> A: "Computing embeddings takes ~50ms per batch. When rebuilding the index, many chunks haven't changed. Disk caching with SHA-256 keys means unchanged text reuses cached vectors instantly. This cuts index rebuild time by 80%+."
 
 ---
 
@@ -732,6 +825,17 @@ Final ranking: [doc_1, doc_2, doc_3, doc_4, doc_5]
 ```
 
 **Without hybrid**: FAISS alone would miss doc_4 (exact runbook name). BM25 alone would miss doc_2 and doc_3 (semantically similar but different words).
+
+### Interview Q&A for RAG Pipeline
+
+> **Q: What is RAG?**
+> A: "Retrieval Augmented Generation. Instead of relying on the LLM's training data (which may be outdated or hallucinated), we first RETRIEVE relevant documents from our knowledge base, then pass them as context to the LLM. This grounds the output in real data."
+
+> **Q: Why hybrid retrieval instead of just vector search?**
+> A: "Vector search finds semantically similar text but misses exact keywords. For example, the alert name 'NodeFilesystemSpaceFillingUp' is an exact string — BM25 matches it perfectly while FAISS might miss it. Hybrid combines both: 60% vector + 40% keyword. Research shows this consistently outperforms either alone."
+
+> **Q: How would you evaluate RAG quality?**
+> A: "We use MRR (Mean Reciprocal Rank) and Recall@K. MRR measures how high the correct document appears in results. Recall@K measures what fraction of relevant documents appear in the top K results. We have a gold evaluation set (Step 38) with queries and expected doc_ids."
 
 ---
 
@@ -1037,9 +1141,22 @@ anomaly.py route handler (THIS FILE — 3 lines of logic)
 
 The route ONLY does: validate input → call service → return response. All ML logic lives in `infer.py` → `features.py`. This is clean separation — routes are easy to test, ML code is reusable.
 
----
+### Interview Q&A for Anomaly Detection
 
-# PHASE 6: Storage (SQL + Feedback)
+> **Q: Why IsolationForest instead of a supervised model?**
+> A: "We don't have labeled anomaly data — in most production systems, anomalies are rare and unlabeled. IsolationForest is unsupervised: it learns what normal looks like and flags anything that's easy to isolate. No labels needed."
+
+> **Q: Why log template mining before anomaly detection?**
+> A: "Raw logs are text — you can't do math on text. Drain3 converts logs into template IDs (numbers), then we count template frequencies per time window. This gives us a fixed-size feature vector that IsolationForest can process."
+
+> **Q: How do you ensure online features match offline features?**
+> A: "Both pipelines load the same `anomaly_vocab.json` file. This guarantees feature vector position #0 always means the same template. If the vocab drifted, the model would produce garbage scores."
+
+> **Q: What happens if the anomaly score is high?**
+> A: "The score flows into the LangGraph agent. A high anomaly score (>0.5) causes the system prompt to emphasize urgency and include the detected log templates. The LLM then generates more targeted remediation steps based on those specific patterns."
+
+> **Q: How would you retrain the model when log patterns change?**
+> A: "Run the offline pipeline: `make features && make train`. This re-parses logs, rebuilds features with updated vocab, trains a new IsolationForest, and logs the experiment to MLflow. Compare the new model against the old one in MLflow before deploying."
 
 ---
 
@@ -1155,19 +1272,336 @@ def submit_feedback(req: FeedbackRequest, session: Session = Depends(get_session
 #                   In tests, you inject a fake session
 ```
 
+### Interview Q&A for Storage & Feedback
+
+> **Q: Why SQLModel instead of raw SQLAlchemy?**
+> A: "SQLModel combines SQLAlchemy (database) and Pydantic (validation) in one class. Same model works for database operations AND API responses. No duplicate class definitions, no manual mapping between ORM objects and schemas."
+
+> **Q: Why dependency injection for database sessions?**
+> A: "Three benefits: (1) routes don't manage their own connections — cleaner code. (2) In tests, you swap `get_session` with a test database session — no production data touched. (3) Session lifecycle is automatic — opens on request, closes after response."
+
+> **Q: Why store feedback? Isn't the LLM output enough?**
+> A: "Feedback creates a human-in-the-loop improvement cycle. If engineers consistently mark disk-full analyses as 'not helpful,' we know our runbooks are missing something. Over time, this feedback becomes training data for fine-tuning and helps us measure system quality."
+
+> **Q: Why `init_db()` on import instead of at startup?**
+> A: "This ensures the feedback table exists before the first request hits. `CREATE TABLE IF NOT EXISTS` is idempotent — it creates the table on first run and does nothing on subsequent runs. This is simpler than adding startup lifecycle hooks."
+
+---
+
+# PHASE 7: Agent Orchestration (LangGraph)
+
+---
+
+## How the Agent Pipeline Works — The Big Picture
+
+```
+POST /incident/analyze
+    │
+    ▼
+incident.py → graph.py state machine:
+    │
+    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌─────────┐    ┌──────────┐    ┌──────┐
+    │  parse   │───▶│ anomaly  │───▶│ retrieve │───▶│  draft  │───▶│ validate │───▶│ done │
+    └──────────┘    └──────────┘    └──────────┘    └─────────┘    └──────────┘    └──────┘
+      Extract         Score          Find             LLM           Check           Return
+      fields          logs          runbooks        generates      evidence        response
+```
+
+This pipeline combines EVERY component we built:
+- Phase 4 (RAG) → `retrieve` node
+- Phase 5 (Anomaly) → `anomaly` node
+- Phase 7 (Agent) → orchestrator + LLM + safety
+
+---
+
+## Step 29: `src/opspilot/agent/prompts.py`
+
+### What
+
+The system prompt — instructions that tell the LLM exactly how to respond.
+
+### Why prompt engineering matters
+
+Without strict prompt instructions:
+```
+LLM says: "Maybe try restarting? I'm not sure, but it could help."  ← vague, no evidence
+```
+
+With our prompt:
+```
+LLM says: {
+  "summary": "NodeDiskRunningFull on payment-api node-42",
+  "actions": [{"action": "Clear /tmp on node-42", "evidence_doc_ids": ["runbook:NodeDiskFull:2"]}]
+}  ← structured, evidence-backed
+```
+
+### Key rules in our prompt
+
+1. **Every action MUST cite `evidence_doc_ids`** — forces the LLM to reference retrieved documents
+2. **Output MUST be valid JSON** — the code needs to parse it, not display raw text
+3. **Be specific** — include exact commands, file paths, service names
+4. **Include verification + fallback** — responsible engineering practice
+
+### How placeholders work
+
+```python
+SYSTEM_PROMPT = "... Anomaly score: {anomaly_score} ... Retrieved context: {retrieved_context} ..."
+```
+
+In `draft_node`, we fill these placeholders:
+```python
+prompt = SYSTEM_PROMPT.format(
+    anomaly_score=0.65,
+    retrieved_context="[runbook:NodeDiskFull:2] To clear disk space, first identify large files...",
+    ...
+)
+```
+
+The LLM sees the actual values, not `{placeholders}`.
+
+---
+
+## Step 30: `src/opspilot/agent/safety.py`
+
+### What
+
+The **hallucination firewall** — filters out actions that don't cite evidence.
+
+### How validation works (example)
+
+```
+LLM generated 3 actions:
+
+Action 1: "Clear /tmp on node-42"
+  evidence_doc_ids: ["runbook:NodeDiskFull:2"]  ← exists in retrieved docs ✅ KEEP
+
+Action 2: "Restart all microservices"
+  evidence_doc_ids: []                          ← no evidence ❌ REJECT
+
+Action 3: "Scale up pods to 10 replicas"
+  evidence_doc_ids: ["runbook:FakeDoc:99"]      ← doc_id not in retrieved docs ❌ REJECT
+
+After validation: only Action 1 survives
+```
+
+### Why this is critical for safety
+
+In production, an on-call engineer trusts the system's recommendations at 3 AM. If the system says "delete /var" with no evidence, it could cause catastrophic damage. Groundedness validation ensures every action traces back to a real document.
+
+### Interview answer
+
+> *"We implement groundedness enforcement at the code level. The safety module checks every recommended action against the set of actually-retrieved document IDs. Actions citing unknown or no documents are logged as warnings and filtered out before reaching the user."*
+
+---
+
+## Step 31: `src/opspilot/agent/tools.py`
+
+### What
+
+The three tool functions the agent can call, plus the LLM interface.
+
+### Tool architecture
+
+```
+graph.py decides WHAT to do (the order)
+tools.py does HOW to do it (the work)
+
+             graph.py                              tools.py
+             ────────                              ────────
+  anomaly_node calls ──────────────────▶  anomaly_score(log_lines)
+                                            └── infer.score_logs()
+
+  retrieve_node calls ─────────────────▶  retrieve_runbooks(query)
+                                            └── HybridRetriever.retrieve()
+
+  draft_node calls ────────────────────▶  call_llm(prompt)
+                                            ├── mock: return template JSON
+                                            └── ollama: POST to local LLM
+```
+
+### Mock vs Real LLM
+
+```
+LLM_PROVIDER=mock (default):
+  → Returns deterministic JSON template (no model needed)
+  → Perfect for: testing, CI/CD, demo, development
+
+LLM_PROVIDER=ollama:
+  → Calls POST http://localhost:11434/api/generate
+  → Uses llama3.2:3b-instruct-q4_K_M (~2GB model)
+  → Perfect for: real usage, showing in interviews
+```
+
+Why mock by default? You can demo the ENTIRE pipeline — all 5 nodes, API response, Streamlit UI — without downloading a 2GB model. The architecture is identical; only the LLM call differs.
+
+---
+
+## Step 32: `src/opspilot/agent/graph.py`
+
+### What
+
+The LangGraph state machine — defines the order of operations and how data flows.
+
+### What is LangGraph?
+
+A framework by the LangChain team for building **stateful AI agents**. Key concepts:
+
+| Concept | What it is | In our code |
+|---------|-----------|-------------|
+| **State** | A TypedDict holding all data | `AgentState` with 7 fields |
+| **Node** | A function that reads/writes state | `parse_node`, `anomaly_node`, etc. |
+| **Edge** | A connection between nodes | `graph.add_edge("parse", "anomaly")` |
+| **Graph** | The assembled pipeline | `graph.compile()` returns a runnable |
+
+### How state flows through nodes
+
+```
+Initial state:
+  {"incident": {alert_title: "DiskFull", log_lines: [...]}}
+
+After parse_node:
+  + {"query": "DiskFull payment-api", "log_lines": [...]}
+
+After anomaly_node:
+  + {"anomaly_result": {"score": 0.65, "top_templates": [...]}}
+
+After retrieve_node:
+  + {"retrieved_chunks": [{doc_id: "runbook:NodeDiskFull:0", text: "...", score: 0.85}]}
+
+After draft_node:
+  + {"draft_response": {"summary": "...", "actions": [...], ...}}
+
+After validate_node:
+  + {"final_response": {"summary": "...", "actions": [only grounded ones], ...}}
+```
+
+Each node returns a dict that gets MERGED into the state. So the state grows as it passes through the pipeline.
+
+### Why TypedDict (not a regular dict)?
+
+```python
+class AgentState(TypedDict):
+    incident: Dict[str, Any]
+    query: str
+    anomaly_result: Dict[str, Any]
+    ...
+```
+
+TypedDict gives you:
+- **IDE autocomplete** — `state["anom` → suggests `anomaly_result`
+- **Type checking** — mypy catches `state["anomly_result"]` typo
+- **Zero runtime cost** — it's just a regular dict at runtime
+
+### Error handling in draft_node
+
+```python
+try:
+    parsed = json.loads(raw)       # Try to parse LLM output as JSON
+except json.JSONDecodeError:
+    parsed = {"summary": raw, ...}  # Fallback: use raw text as summary
+```
+
+LLMs don't always return valid JSON. This fallback ensures the pipeline never crashes — worst case, you get the raw LLM text as the summary.
+
+---
+
+## Step 33: `src/opspilot/api/routes/incident.py`
+
+### What
+
+`POST /incident/analyze` — the main endpoint. Everything converges here.
+
+### Full request lifecycle
+
+```
+Engineer clicks "Analyze" in Streamlit UI
+    │
+    ▼
+POST /incident/analyze
+  Body: {
+    "incident_id": "INC-2026-0042",
+    "alert_title": "NodeDiskRunningFull",
+    "service": "payment-api",
+    "log_lines": ["ERROR disk full on /dev/sda1", ...]
+  }
+    │
+    ▼
+incident.py route handler
+    │
+    ├── req.model_dump()          → convert Pydantic → dict
+    ├── agent.invoke({"incident": dict})
+    │       ├── parse_node        → extract query + log_lines
+    │       ├── anomaly_node      → score = 0.65
+    │       ├── retrieve_node     → 6 runbook chunks
+    │       ├── draft_node        → LLM generates analysis
+    │       └── validate_node     → filter ungrounded actions
+    │
+    └── Return IncidentAnalysisResponse:
+        {
+          "summary": "Disk usage critical on node-42...",
+          "anomaly_report": {"score": 0.65, ...},
+          "retrieved_context": [{doc_id, title, text, score}, ...],
+          "actions": [{action, evidence_doc_ids}, ...],
+          "verification_steps": ["df -h on node-42", ...],
+          "fallback_plan": ["Escalate to on-call lead", ...],
+          "postmortem_markdown": "## Incident Summary\n...",
+          "trace": {"nodes_executed": ["parse","anomaly","retrieve","draft","validate"]}
+        }
+```
+
+### Why `model_dump()` instead of `dict()`?
+
+Pydantic v2 renamed `.dict()` to `.model_dump()`. It converts the Pydantic model to a plain Python dict that LangGraph can use as state.
+
+### Why `trace` in the response?
+
+```python
+trace={"nodes_executed": ["parse", "anomaly", "retrieve", "draft", "validate"]}
+```
+
+This shows the engineer which agent steps ran. Useful for debugging: "Did the agent skip retrieval? Did validation remove all actions?" In a production system, you'd add timestamps and durations per node.
+
 ---
 
 # REMAINING STEPS (Quick Reference)
 
-## Phase 7: Agent Orchestration (LangGraph)
-- **Step 29**: `src/opspilot/agent/prompts.py` — system prompt enforcing JSON + evidence
-- **Step 30**: `src/opspilot/agent/safety.py` — validate_grounded_actions (reject actions without evidence)
-- **Step 31**: `src/opspilot/agent/tools.py` — tool functions (retrieve, anomaly_score)
-- **Step 32**: `src/opspilot/agent/graph.py` — LangGraph state machine: parse→anomaly→retrieve→draft→done
-- **Step 33**: `src/opspilot/api/routes/incident.py` — POST /incident/analyze
+## Phase 8: Auth + Admin (Steps 34-35)
+- **Step 34**: `src/opspilot/api/deps.py` — JWT token decoding + role-based access control (RBAC). Uses `Depends()` to protect endpoints. Optional by default.
+- **Step 35**: `src/opspilot/api/routes/admin.py` — Admin-only endpoints for system health, clearing caches, viewing feedback stats.
 
-## Phase 8-14
-- Steps 34-57: Auth, Streamlit UI, Evaluation, DVC, Prefect, Tests, CI/CD, Docs, Ship
+## Phase 9: Streamlit UI (Step 36)
+- **Step 36**: `ui/streamlit_app.py` — The frontend incident console. Engineers paste an incident, click "Analyze," see results with anomaly score, retrieved context, recommended actions, and draft postmortem. Uses `httpx` to call the API.
+
+## Phase 10: Evaluation + DVC (Steps 37-39)
+- **Step 37**: `scripts/eval/run_eval.py` — RAG evaluation script. Compares retrieved chunks against gold-standard answers, computes MRR and Recall@K.
+- **Step 38**: `data/eval/rag_gold.jsonl` — Seed evaluation set: 10-20 queries with expected doc_ids. Used by the eval script.
+- **Step 39**: `params.yaml` + `dvc.yaml` — DVC pipeline config. `dvc repro` runs: download → parse → features → train → index → eval, end-to-end reproducibly.
+
+## Phase 11: Prefect Workflows (Steps 40-41)
+- **Step 40**: `src/opspilot/workflows/prefect_flows.py` — Scheduled jobs: nightly reindex of runbooks, weekly model retraining.
+- **Step 41**: `src/opspilot/workflows/drift.py` — Evidently-based drift detection: monitors if log patterns shift significantly from training data.
+
+## Phase 12: Tests + CI/CD (Steps 42-45)
+- **Step 42**: `tests/test_api_contract.py` — FastAPI test client validates all endpoints return correct schemas.
+- **Step 43**: `tests/test_agent_safety.py` — Tests that `validate_grounded_actions` correctly rejects ungrounded actions.
+- **Step 44**: `.github/workflows/ci.yml` — GitHub Actions: lint, type-check, test on every push.
+- **Step 45**: `.github/workflows/docker-build.yml` — GitHub Actions: build Docker images, verify they start.
+
+## Phase 13: Documentation (Steps 46-50)
+- **Step 46**: `README.md` — Flagship repo README with architecture diagram, quickstart, demo GIF.
+- **Step 47**: `docs/` — system_design.md (architecture decisions), data_licenses.md (Loghub, Apache-2.0).
+- **Step 48**: `examples/` — Example API payloads (curl commands) for every endpoint.
+- **Step 49**: `scripts/bootstrap.sh` — One-command setup: install deps + download data + build index + train model.
+- **Step 50**: `.pre-commit-config.yaml` — Auto-format and lint on every git commit.
+
+## Phase 14: Verification & Ship (Steps 51-57)
+- **Step 51**: Install deps and verify all imports work.
+- **Step 52**: Run API health check end-to-end.
+- **Step 53**: Run full pytest suite.
+- **Step 54**: Create Grafana dashboard JSON for Prometheus metrics.
+- **Step 55**: Final ship checklist — `docker compose up`, `bootstrap.sh`, test every endpoint.
+- **Step 56**: Git tag `v0.1.0` and push.
+- **Step 57**: `docs/demo_script.md` — Interview presentation walkthrough with talking points.
 
 ---
 
