@@ -15,7 +15,7 @@
 | Phase 5: Anomaly Detection | Steps 20-25 | ✅ Complete | `feat: add anomaly detection pipeline with Drain3, IsolationForest, and MLflow` |
 | Phase 6: Storage (SQL + Feedback) | Steps 26-28 | ✅ Complete | `feat: add database storage and feedback endpoint` |
 | Phase 7: Agent Orchestration | Steps 29-33 | ✅ Complete | `feat: add LangGraph agent with safety validation and incident endpoint` |
-| Phase 8: Auth + Admin | Steps 34-35 | ⬜ Not started | |
+| Phase 8: Auth + Admin | Steps 34-35 | ✅ Complete | `feat: add JWT auth, RBAC, and admin endpoints` |
 | Phase 9: Streamlit UI | Step 36 | ⬜ Not started | |
 | Phase 10: Evaluation + DVC | Steps 37-39 | ⬜ Not started | |
 | Phase 11: Prefect Workflows | Steps 40-41 | ⬜ Not started | |
@@ -1563,11 +1563,122 @@ This shows the engineer which agent steps ran. Useful for debugging: "Did the ag
 
 ---
 
-# REMAINING STEPS (Quick Reference)
+# PHASE 8: Auth + Admin
 
-## Phase 8: Auth + Admin (Steps 34-35)
-- **Step 34**: `src/opspilot/api/deps.py` — JWT token decoding + role-based access control (RBAC). Uses `Depends()` to protect endpoints. Optional by default.
-- **Step 35**: `src/opspilot/api/routes/admin.py` — Admin-only endpoints for system health, clearing caches, viewing feedback stats.
+---
+
+## How Authentication Flows Through the API
+
+```
+Request arrives with header: Authorization: Bearer eyJhbGci...
+    │
+    ▼
+HTTPBearer extracts the token string
+    │
+    ▼
+get_current_user() in deps.py
+    ├── AUTH_ENABLED=false? → return {"sub": "dev-user", "role": "admin"} (skip check)
+    └── AUTH_ENABLED=true?  → jwt.decode(token) → {"sub": "adarsh", "role": "admin"}
+         ├── Token expired? → 401 Unauthorized
+         ├── Token invalid? → 401 Unauthorized
+         └── Token valid?   → return payload dict
+```
+
+---
+
+## Step 34: `src/opspilot/api/deps.py`
+
+### What
+
+JWT authentication dependency + role-based access control (RBAC) factory.
+
+### JWT token anatomy
+
+```
+eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZGFyc2giLCJyb2xlIjoiYWRtaW4ifQ.xyz123
+│                       │                                               │
+Header (algorithm)      Payload (claims)                               Signature
+                        sub = "adarsh"                                  HMAC(header+payload, secret)
+                        role = "admin"
+```
+
+### How `require_role()` factory works
+
+```python
+# This creates a dependency that checks for admin role:
+admin_dep = Depends(require_role("admin"))
+
+# Under the hood:
+require_role("admin")
+    └── returns checker() function
+        └── calls get_current_user()  → decode JWT
+            └── checks user["role"] == "admin"
+                ├── yes → request proceeds
+                └── no  → 403 Forbidden
+```
+
+### Why optional by default
+
+`AUTH_ENABLED=false` (default) means no tokens needed during development. This means:
+- No JWT setup for local testing
+- Swagger UI works without auth headers
+- CI tests don't need token generation
+- Flip to `true` in production Docker via `.env`
+
+### Interview Q&A for Auth
+
+> **Q: Why JWT instead of session-based auth?**
+> A: "JWT is stateless — the server doesn't need to store sessions. Each token contains the user's identity and role. This is ideal for APIs because there's no session store to manage, and tokens work across multiple API instances behind a load balancer."
+
+> **Q: How would you revoke a JWT?**
+> A: "JWTs can't be revoked individually since they're stateless. Options: (1) short expiry times (15 min) with refresh tokens. (2) A blocklist in Redis for emergency revocation. (3) Rotate the JWT_SECRET to invalidate ALL tokens. We use short expiry."
+
+---
+
+## Step 35: `src/opspilot/api/routes/admin.py`
+
+### What
+
+Three admin-only endpoints protected by `require_role("admin")`.
+
+### Endpoint details
+
+| Endpoint | Method | What it does | When to use |
+|----------|--------|-------------|-------------|
+| `/admin/health` | GET | Detailed component status | Debugging: "is the model loaded?" |
+| `/admin/clear-cache` | POST | Clears `@lru_cache` on models/indexes | After retraining or updating runbooks |
+| `/admin/feedback-stats` | GET | Total feedback, helpful %, counts | Quality dashboard |
+
+### Why `cache_clear()` matters
+
+```python
+from opspilot.agent.tools import _get_retriever
+_get_retriever.cache_clear()  # Forces next request to reload the FAISS index
+```
+
+When you update runbooks and rebuild the FAISS index, the old index is still cached in memory. `cache_clear()` evicts it so the next request loads the fresh index.
+
+### Why `dependencies=[admin_dep]` instead of function parameter?
+
+```python
+# This approach:
+@router.get("/health", dependencies=[admin_dep])  # Auth check runs, but result not used
+def admin_health():              # No user parameter needed
+
+# vs this approach (when you need user info):
+@router.get("/profile")
+def profile(user=Depends(get_current_user)):  # user dict available in function
+```
+
+`dependencies=` runs the check but discards the result. Use it when you need auth but don't need user info in the function body.
+
+### Interview Q&A for Admin
+
+> **Q: Why separate admin endpoints from regular endpoints?**
+> A: "Separation of concerns and security. Admin endpoints can modify system state (clear caches, view all feedback). Regular users should never access these. The `require_role` decorator enforces this at the code level, not just documentation."
+
+> **Q: How would you add rate limiting?**
+> A: "Add a `slowapi` or custom middleware that tracks requests per IP/user. For admin endpoints, we'd be more lenient. For `/incident/analyze`, limit to 10 req/min per user to prevent abuse of the LLM."
 
 ## Phase 9: Streamlit UI (Step 36)
 - **Step 36**: `ui/streamlit_app.py` — The frontend incident console. Engineers paste an incident, click "Analyze," see results with anomaly score, retrieved context, recommended actions, and draft postmortem. Uses `httpx` to call the API.
