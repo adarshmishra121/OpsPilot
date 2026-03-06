@@ -16,7 +16,7 @@
 | Phase 6: Storage (SQL + Feedback) | Steps 26-28 | ✅ Complete | `feat: add database storage and feedback endpoint` |
 | Phase 7: Agent Orchestration | Steps 29-33 | ✅ Complete | `feat: add LangGraph agent with safety validation and incident endpoint` |
 | Phase 8: Auth + Admin | Steps 34-35 | ✅ Complete | `feat: add JWT auth, RBAC, and admin endpoints` |
-| Phase 9: Streamlit UI | Step 36 | ⬜ Not started | |
+| Phase 9: Streamlit UI | Step 36 | ✅ Complete | `feat: add Streamlit incident response console` |
 | Phase 10: Evaluation + DVC | Steps 37-39 | ⬜ Not started | |
 | Phase 11: Prefect Workflows | Steps 40-41 | ⬜ Not started | |
 | Phase 12: Tests + CI/CD | Steps 42-45 | ⬜ Not started | |
@@ -1680,8 +1680,118 @@ def profile(user=Depends(get_current_user)):  # user dict available in function
 > **Q: How would you add rate limiting?**
 > A: "Add a `slowapi` or custom middleware that tracks requests per IP/user. For admin endpoints, we'd be more lenient. For `/incident/analyze`, limit to 10 req/min per user to prevent abuse of the LLM."
 
-## Phase 9: Streamlit UI (Step 36)
-- **Step 36**: `ui/streamlit_app.py` — The frontend incident console. Engineers paste an incident, click "Analyze," see results with anomaly score, retrieved context, recommended actions, and draft postmortem. Uses `httpx` to call the API.
+---
+
+# PHASE 9: Streamlit UI
+
+---
+
+## Step 36: `ui/streamlit_app.py`
+
+### What
+
+The **frontend dashboard** — a full incident response console built with Streamlit. Engineers interact with OpsPilot through this UI instead of raw API calls.
+
+### UI Layout
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  SIDEBAR                 │  MAIN AREA                                      │
+│                          │                                                 │
+│  Incident ID: [______]   │  🗑️ OpsPilot — Incident Response Console           │
+│  Alert Title: [______]   │                                                 │
+│  Service:     [______]   │  🔴 Anomaly: 0.65  📄 Lines: 3  📚 Runbooks: 6    │
+│  Environment: [______]   │                                                 │
+│                          │  [📊 Summary] [📚 Context] [🔧 Actions] [📝 Post]  │
+│  Log Lines:              │  ┌───────────────────────────────────────────┐  │
+│  [                    ]   │  │ Disk usage critical on node-42...       │  │
+│  [   ERROR disk...    ]   │  │ Top templates: disk_full, inode_warn    │  │
+│  [   WARN inode...    ]   │  └───────────────────────────────────────────┘  │
+│                          │                                                 │
+│  [🔍 Analyze Incident]   │  🔍 Agent Trace (debug) ▸                       │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### How data flows (UI → API → UI)
+
+```
+1. Engineer fills sidebar inputs
+2. Clicks "🔍 Analyze Incident"
+3. Streamlit sends: POST http://localhost:8000/incident/analyze
+   Body: {incident_id, alert_title, service, log_lines}
+4. API runs graph.py pipeline (parse → anomaly → retrieve → draft → validate)
+5. API returns IncidentAnalysisResponse JSON
+6. Streamlit renders results in 4 tabs:
+   - Summary: incident summary + anomaly templates
+   - Context: expandable runbook chunks with scores
+   - Actions: recommended steps + checkable verification steps
+   - Postmortem: rendered markdown draft
+```
+
+### Key Streamlit widgets used
+
+| Widget | What it does | Our usage |
+|--------|-------------|-----------||
+| `st.text_input()` | Single-line text field | Incident ID, alert title, service |
+| `st.text_area()` | Multi-line text field | Log lines input |
+| `st.button()` | Clickable button | "Analyze Incident" trigger |
+| `st.spinner()` | Loading animation | Shown while API processes |
+| `st.metric()` | Big number display | Anomaly score, line count |
+| `st.tabs()` | Tab navigation | Summary, Context, Actions, Postmortem |
+| `st.expander()` | Collapsible section | Runbook chunk detail, agent trace |
+| `st.checkbox()` | Checkable item | Verification steps checklist |
+| `st.columns()` | Side-by-side layout | Score, lines, runbooks in a row |
+
+### Why Streamlit instead of React/Vue?
+
+- **Zero frontend code** — no HTML, CSS, JavaScript needed
+- **Pure Python** — same language as the backend
+- **Hot reload** — save file, page auto-refreshes
+- **Built-in widgets** — everything from buttons to charts
+- **102 lines** — full dashboard in one file
+
+### Error handling
+
+```python
+try:
+    resp = httpx.post(f"{API_URL}/incident/analyze", json=payload, timeout=120.0)
+except httpx.ConnectError:
+    st.error("❌ Cannot connect to API. Is the server running on port 8000?")
+    st.stop()  # ← stops rendering the rest of the page
+```
+
+Two failure modes handled:
+1. **API not running** → friendly error with suggestion
+2. **API returns error** → shows status code and response body
+
+### How to run
+
+```bash
+# Terminal 1: Start API
+uvicorn opspilot.api.main:app --reload --port 8000
+
+# Terminal 2: Start UI
+streamlit run ui/streamlit_app.py --server.port 8501
+
+# Open browser: http://localhost:8501
+```
+
+In Docker Compose, both run automatically and the UI connects to `http://api:8000` instead of `localhost`.
+
+### Interview Q&A for Streamlit
+
+> **Q: Why Streamlit instead of a React frontend?**
+> A: "For an internal SRE tool, development speed matters more than pixel-perfect UI. Streamlit gives us a working dashboard in 102 lines of Python. A React app would need 500+ lines across multiple files, plus a build pipeline. We can always migrate later if needed."
+
+> **Q: How would you deploy Streamlit in production?**
+> A: "Streamlit runs as a separate service in Docker Compose. It connects to the API via the Docker network. For multi-user production, we'd add Streamlit Community Cloud or put it behind nginx with basic auth. The API is the real backend — Streamlit is just a thin client."
+
+> **Q: What happens if the LLM takes too long?**
+> A: "We set `timeout=120.0` on the httpx call. Streamlit shows a spinner during the wait. If it times out, the except block shows an error. In production, we'd add a progress bar and consider async API calls with polling."
+
+---
+
+# REMAINING STEPS (Quick Reference)
 
 ## Phase 10: Evaluation + DVC (Steps 37-39)
 - **Step 37**: `scripts/eval/run_eval.py` — RAG evaluation script. Compares retrieved chunks against gold-standard answers, computes MRR and Recall@K.
