@@ -1,0 +1,12 @@
+{"query": "NodeDiskRunningFull alert on payment service", "expected_doc_ids": ["runbook:NodeFilesystemSpaceFillingUp:0", "runbook:NodeFilesystemSpaceFillingUp:1"]}
+{"query": "high CPU usage on kubernetes node", "expected_doc_ids": ["runbook:CPUThrottlingHigh:0", "runbook:CPUThrottlingHigh:1"]}
+{"query": "pod crashloopbackoff restart failing", "expected_doc_ids": ["runbook:KubePodCrashLooping:0", "runbook:KubePodCrashLooping:1"]}
+{"query": "memory pressure out of memory OOMKilled", "expected_doc_ids": ["runbook:KubeMemoryOvercommit:0", "runbook:NodeMemoryHighUtilization:0"]}
+{"query": "persistent volume claim pending not bound", "expected_doc_ids": ["runbook:KubePersistentVolumeFillingUp:0", "runbook:KubePersistentVolumeFillingUp:1"]}
+{"query": "deployment replicas not available rollout stuck", "expected_doc_ids": ["runbook:KubeDeploymentReplicasMismatch:0", "runbook:KubeDeploymentReplicasMismatch:1"]}
+{"query": "network connectivity timeout connection refused", "expected_doc_ids": ["runbook:TargetDown:0"]}
+{"query": "container image pull backoff registry error", "expected_doc_ids": ["runbook:KubeContainerWaiting:0"]}
+{"query": "alertmanager not firing notifications silence", "expected_doc_ids": ["runbook:AlertmanagerFailedToSendAlerts:0"]}
+{"query": "prometheus scrape target down metrics missing", "expected_doc_ids": ["runbook:TargetDown:0", "runbook:PrometheusTargetSyncFailure:0"]}
+{"query": "kube scheduler not scheduling pods pending", "expected_doc_ids": ["runbook:KubeSchedulerDown:0"]}
+{"query": "etcd high fsync latency slow cluster", "expected_doc_ids": ["runbook:etcdHighFsyncDurations:0", "runbook:etcdHighFsyncDurations:1"]}

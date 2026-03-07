@@ -17,7 +17,7 @@
 | Phase 7: Agent Orchestration | Steps 29-33 | ✅ Complete | `feat: add LangGraph agent with safety validation and incident endpoint` |
 | Phase 8: Auth + Admin | Steps 34-35 | ✅ Complete | `feat: add JWT auth, RBAC, and admin endpoints` |
 | Phase 9: Streamlit UI | Step 36 | ✅ Complete | `feat: add Streamlit incident response console` |
-| Phase 10: Evaluation + DVC | Steps 37-39 | ⬜ Not started | |
+| Phase 10: Evaluation + DVC | Steps 37-39 | ✅ Complete | `feat: add RAG evaluation, gold set, and DVC pipeline` |
 | Phase 11: Prefect Workflows | Steps 40-41 | ⬜ Not started | |
 | Phase 12: Tests + CI/CD | Steps 42-45 | ⬜ Not started | |
 | Phase 13: Documentation | Steps 46-50 | ⬜ Not started | |
@@ -1791,12 +1791,120 @@ In Docker Compose, both run automatically and the UI connects to `http://api:800
 
 ---
 
-# REMAINING STEPS (Quick Reference)
+# PHASE 10: Evaluation + DVC
 
-## Phase 10: Evaluation + DVC (Steps 37-39)
-- **Step 37**: `scripts/eval/run_eval.py` — RAG evaluation script. Compares retrieved chunks against gold-standard answers, computes MRR and Recall@K.
-- **Step 38**: `data/eval/rag_gold.jsonl` — Seed evaluation set: 10-20 queries with expected doc_ids. Used by the eval script.
-- **Step 39**: `params.yaml` + `dvc.yaml` — DVC pipeline config. `dvc repro` runs: download → parse → features → train → index → eval, end-to-end reproducibly.
+---
+
+## How Reproducibility Works in OpsPilot
+
+```
+dvc repro
+  │
+  ├── download:  python scripts/data/download_all.py      → data/raw/
+  ├── parse:     python scripts/features/parse_logs.py    → artifacts/templates.parquet
+  ├── features:  python scripts/features/build_features.py → artifacts/features.parquet + vocab.json
+  ├── train:     python scripts/train/train_anomaly.py     → models/anomaly_model.pkl
+  ├── index:     python scripts/rag/build_index.py         → artifacts/vector_index/
+  └── eval:      python scripts/eval/run_eval.py           → artifacts/eval_metrics.json
+
+DVC only re-runs stages whose inputs changed. Smart caching = fast iteration.
+```
+
+---
+
+## Step 37: `scripts/eval/run_eval.py`
+
+### What
+
+Measures RAG retrieval quality using MRR and Recall@K against a gold-standard set.
+
+### How evaluation works (example)
+
+```
+Gold query: "NodeDiskRunningFull" → Expected: ["runbook:NodeDiskFull:0", "runbook:NodeDiskFull:1"]
+
+Retriever returns:
+  Rank 1: "runbook:NodeDiskFull:0"    ✅ hit!
+  Rank 2: "runbook:OtherDoc:3"        ❌ miss
+  Rank 3: "runbook:NodeDiskFull:1"    ✅ hit!
+
+MRR = 1/1 = 1.0   (first hit at rank 1 → 1/1)
+Recall@6 = 2/2 = 1.0  (found both docs in top 6)
+```
+
+### Metrics explained
+
+| Metric | Meaning | Formula | Good value |
+|--------|---------|---------|------------|
+| **MRR** | How high is the first correct result? | 1/rank_of_first_hit | > 0.7 |
+| **Recall@K** | Fraction of correct docs in top K | hits/total_expected | > 0.8 |
+
+### Output
+
+`artifacts/eval_metrics.json` — tracked by DVC. When you change parameters, `dvc metrics diff` shows before/after.
+
+---
+
+## Step 38: `data/eval/rag_gold.jsonl`
+
+### What
+
+12 hand-picked queries with expected document IDs. The "answer key" for the eval script.
+
+### Why hand-curated?
+
+Automated gold sets can have errors. Hand-picking ensures each query-answer pair is correct. Start with 12 high-quality queries, expand as the system matures.
+
+### JSONL format
+
+One JSON object per line (not a JSON array). This is streaming-friendly — you can process lines one at a time without loading the whole file.
+
+---
+
+## Step 39: `params.yaml` + `dvc.yaml`
+
+### What
+
+- `params.yaml` — all tunable parameters in one file
+- `dvc.yaml` — pipeline stages with dependencies
+
+### Why params.yaml?
+
+Without it, parameters are scattered across 6+ scripts. Changing `contamination` from 0.01 to 0.02 means editing `train_anomaly.py` directly. With `params.yaml`, all values live in one place. DVC detects parameter changes and reruns affected stages.
+
+### DVC stage anatomy
+
+```yaml
+train:
+  cmd: python scripts/train/train_anomaly.py   # Command to run
+  deps:                                         # Input files
+    - scripts/train/train_anomaly.py
+    - artifacts/features.parquet
+  params:                                       # Parameters from params.yaml
+    - anomaly.n_estimators
+    - anomaly.contamination
+  outs:                                         # Output files
+    - models/anomaly_model.pkl
+  metrics:                                      # Tracked metrics
+    - artifacts/train_metrics.json
+```
+
+If any `deps` or `params` change, DVC reruns this stage. If nothing changed, it skips → fast.
+
+### Interview Q&A for Evaluation + DVC
+
+> **Q: Why DVC instead of Makefiles?**
+> A: "DVC understands data dependencies and caches intermediate results. A Makefile reruns everything or requires manual timestamp tracking. DVC also integrates with Git — `dvc metrics diff` compares metrics across git commits."
+
+> **Q: How would you expand the gold set?**
+> A: "Run the system on real incidents, note where retrieval fails, add those queries with correct expected docs. Over time, the gold set grows organically from real failures, making it increasingly representative."
+
+> **Q: What's the difference between `deps` and `params` in DVC?**
+> A: "`deps` are files — scripts, datasets. `params` are values from `params.yaml`. DVC tracks both, but `params` are shown in `dvc params diff` for easy comparison between experiments."
+
+---
+
+# REMAINING STEPS (Quick Reference)
 
 ## Phase 11: Prefect Workflows (Steps 40-41)
 - **Step 40**: `src/opspilot/workflows/prefect_flows.py` — Scheduled jobs: nightly reindex of runbooks, weekly model retraining.

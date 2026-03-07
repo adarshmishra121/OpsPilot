@@ -1,0 +1,69 @@
+# OpsPilot — DVC pipeline definition
+# Run: dvc repro
+
+stages:
+  download:
+    cmd: python scripts/data/download_all.py
+    outs:
+      - data/raw/HDFS.log
+      - data/raw/runbooks
+
+  parse:
+    cmd: python scripts/features/parse_logs.py
+    deps:
+      - scripts/features/parse_logs.py
+      - data/raw/HDFS.log
+    params:
+      - anomaly.max_lines
+    outs:
+      - artifacts/templates.parquet
+
+  features:
+    cmd: python scripts/features/build_features.py
+    deps:
+      - scripts/features/build_features.py
+      - artifacts/templates.parquet
+    params:
+      - anomaly.window_size
+      - anomaly.vocab_size
+    outs:
+      - artifacts/features.parquet
+      - artifacts/anomaly_vocab.json
+
+  train:
+    cmd: python scripts/train/train_anomaly.py
+    deps:
+      - scripts/train/train_anomaly.py
+      - artifacts/features.parquet
+    params:
+      - anomaly.n_estimators
+      - anomaly.contamination
+    outs:
+      - models/anomaly_model.pkl
+    metrics:
+      - artifacts/train_metrics.json:
+          cache: false
+
+  index:
+    cmd: python scripts/rag/build_index.py
+    deps:
+      - scripts/rag/build_index.py
+      - data/raw/runbooks
+    params:
+      - rag.chunk_size
+      - rag.chunk_overlap
+      - rag.embedding_model
+    outs:
+      - artifacts/vector_index
+
+  eval:
+    cmd: python scripts/eval/run_eval.py
+    deps:
+      - scripts/eval/run_eval.py
+      - data/eval/rag_gold.jsonl
+      - artifacts/vector_index
+    params:
+      - eval.top_k
+    metrics:
+      - artifacts/eval_metrics.json:
+          cache: false

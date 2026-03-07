@@ -1,0 +1,22 @@
+# OpsPilot — Central parameter configuration
+# All tunable values in one place for reproducibility
+
+# Anomaly detection
+anomaly:
+  max_lines: 500000
+  window_size: 500
+  vocab_size: 300
+  n_estimators: 150
+  contamination: 0.01
+
+# RAG retrieval
+rag:
+  chunk_size: 512
+  chunk_overlap: 64
+  embedding_model: "all-MiniLM-L6-v2"
+  hybrid_alpha: 0.6
+  top_k: 6
+
+# Evaluation
+eval:
+  top_k: 6
