@@ -18,8 +18,8 @@
 | Phase 8: Auth + Admin | Steps 34-35 | ✅ Complete | `feat: add JWT auth, RBAC, and admin endpoints` |
 | Phase 9: Streamlit UI | Step 36 | ✅ Complete | `feat: add Streamlit incident response console` |
 | Phase 10: Evaluation + DVC | Steps 37-39 | ✅ Complete | `feat: add RAG evaluation, gold set, and DVC pipeline` |
-| Phase 11: Prefect Workflows | Steps 40-41 | ⬜ Not started | |
-| Phase 12: Tests + CI/CD | Steps 42-45 | ⬜ Not started | |
+| Phase 11: Prefect Workflows | Steps 40-41 | ✅ Complete | `feat: add Prefect workflows and Evidently drift detection` |
+| Phase 12: Tests + CI/CD | Steps 42-45 | ✅ Complete | `feat: add tests and CI/CD pipelines` |
 | Phase 13: Documentation | Steps 46-50 | ⬜ Not started | |
 | Phase 14: Verification & Ship | Steps 51-57 | ⬜ Not started | |
 
@@ -1906,15 +1906,197 @@ If any `deps` or `params` change, DVC reruns this stage. If nothing changed, it 
 
 # REMAINING STEPS (Quick Reference)
 
-## Phase 11: Prefect Workflows (Steps 40-41)
-- **Step 40**: `src/opspilot/workflows/prefect_flows.py` — Scheduled jobs: nightly reindex of runbooks, weekly model retraining.
-- **Step 41**: `src/opspilot/workflows/drift.py` — Evidently-based drift detection: monitors if log patterns shift significantly from training data.
+# PHASE 11: Prefect Workflows + Drift
 
-## Phase 12: Tests + CI/CD (Steps 42-45)
-- **Step 42**: `tests/test_api_contract.py` — FastAPI test client validates all endpoints return correct schemas.
-- **Step 43**: `tests/test_agent_safety.py` — Tests that `validate_grounded_actions` correctly rejects ungrounded actions.
-- **Step 44**: `.github/workflows/ci.yml` — GitHub Actions: lint, type-check, test on every push.
-- **Step 45**: `.github/workflows/docker-build.yml` — GitHub Actions: build Docker images, verify they start.
+---
+
+## Step 40: `src/opspilot/workflows/prefect_flows.py`
+
+### What
+
+Three Prefect flows that automate maintenance tasks:
+
+| Flow | Schedule | What it does |
+|------|----------|--------------|
+| `nightly_reindex` | Every 24h | Pull runbooks → rebuild FAISS index → run eval |
+| `weekly_retrain` | Every 7d | Download logs → parse → features → train model |
+| `full_pipeline` | On-demand | All stages end-to-end |
+
+### How Prefect tasks work
+
+```python
+@task(retries=2, retry_delay_seconds=30)  # Retry twice if download fails
+def download_data():
+    subprocess.run(["python", "scripts/data/download_all.py"], check=True)
+```
+
+- `@task` — wraps a function as a Prefect task (tracked, retriable)
+- `retries=2` — if it fails, retry up to 2 times
+- `retry_delay_seconds=30` — wait 30s between retries
+- `check=True` — raises exception if script exits with error
+
+### Why subprocess instead of direct imports?
+
+Each script has its own imports and setup. Running via subprocess keeps tasks isolated — a memory leak in `train_anomaly.py` doesn't affect `build_index.py`. This is the standard pattern for ML pipelines.
+
+### Interview Q&A for Prefect
+
+> **Q: Why Prefect instead of Airflow?**
+> A: "Prefect is Python-native — decorators on regular functions, no DAG files. Airflow requires separate DAG definitions, a scheduler process, and a metadata database. For a local project, Prefect is dramatically simpler."
+
+> **Q: How would you schedule these flows?**
+> A: "In production: `prefect deployment build -n nightly --cron '0 2 * * *'`. Locally, just run `python -m opspilot.workflows.prefect_flows` for the full pipeline."
+
+---
+
+## Step 41: `src/opspilot/workflows/drift.py`
+
+### What
+
+Detects when incoming log patterns drift away from training data using Evidently.
+
+### How drift detection works
+
+```
+Training features (reference):     Current features (production):
+  Template T1: 30%                   Template T1: 5%     ← shifted!
+  Template T2: 25%                   Template T2: 10%    ← shifted!
+  Template T99: 0%                   Template T99: 40%   ← new!
+
+Evidently runs K-S test per feature:
+  → share_of_drifted_columns: 0.45 (45% of features drifted)
+  → dataset_drift: true
+  → ALERT: retrain the model!
+```
+
+### Output: `artifacts/drift_report.json`
+
+```json
+{
+  "drift_detected": true,
+  "drift_score": 0.45,
+  "n_features": 300,
+  "n_drifted": 135
+}
+```
+
+### Interview Q&A for Drift Detection
+
+> **Q: Why monitor for drift?**
+> A: "ML models assume production data matches training data. When log patterns change (new services, different errors), the model's scores become unreliable. Drift detection catches this before it causes harm."
+
+> **Q: What's a K-S test?**
+> A: "Kolmogorov-Smirnov test — compares two distributions statistically. It outputs a p-value: low p-value means the distributions are different. Evidently uses this per feature column to detect which features have shifted."
+
+# PHASE 12: Tests + CI/CD
+
+---
+
+## Step 42: `tests/test_api_contract.py`
+
+### What
+
+API contract tests using FastAPI's `TestClient`. Hits every endpoint and verifies correct response shapes.
+
+### How TestClient works
+
+```
+Normal request:                    Test request:
+Browser → HTTP → uvicorn → app    TestClient → app (directly, no network!)
+```
+
+TestClient calls the app in-process — no server needed, tests run in milliseconds.
+
+### What we test
+
+| Endpoint | Tests |
+|----------|-------|
+| `GET /health` | Returns 200, has `status` and `version` |
+| `POST /incident/analyze` | Returns 200, has summary/anomaly/actions/trace, 422 on bad input |
+| `POST /rag/search` | Returns 200, result is a list |
+| `POST /feedback` | Returns 200 on valid feedback |
+| `GET /admin/health` | Returns 200, status is "healthy" |
+| `POST /admin/clear-cache` | Returns 200, has "cleared" key |
+
+---
+
+## Step 43: `tests/test_agent_safety.py`
+
+### What
+
+Dedicated tests for the groundedness validator — the most critical safety component.
+
+### Test coverage
+
+| Test | What it proves |
+|------|---------------|
+| `test_grounded_action_passes` | Valid evidence → action kept |
+| `test_ungrounded_action_rejected` | Fake doc_id → action removed |
+| `test_empty_evidence_rejected` | No evidence → action removed |
+| `test_mixed_actions_filtered` | 3 actions in, only 1 grounded → 1 out |
+| `test_empty_actions_returns_empty` | Edge case: empty list |
+| `test_empty_retrieved_rejects_all` | No docs retrieved → reject everything |
+
+---
+
+## Step 44: `.github/workflows/ci.yml`
+
+### What
+
+GitHub Actions CI pipeline: lint → format check → test on every push.
+
+### Pipeline steps
+
+```
+git push → GitHub triggers CI
+  ├── ruff check     (catches unused imports, bad patterns)
+  ├── ruff format    (catches inconsistent formatting)
+  └── pytest         (runs all tests with mock LLM + SQLite)
+```
+
+### Why `LLM_PROVIDER=mock` in CI?
+
+CI runners don't have Ollama or GPUs. Mock mode gives deterministic, fast responses. The architecture is tested; only the LLM output differs.
+
+---
+
+## Step 45: `.github/workflows/docker-build.yml`
+
+### What
+
+Separate workflow that builds Docker images and verifies they start.
+
+### Matrix strategy
+
+```yaml
+strategy:
+  matrix:
+    service: [api, ui]   # Builds BOTH images in parallel
+```
+
+GitHub runs two jobs simultaneously — one for API, one for UI. If either fails, the workflow fails.
+
+### Path filtering
+
+```yaml
+paths:
+  - "docker/**"
+  - "src/**"
+  - "pyproject.toml"
+```
+
+Only triggers when Docker-related files change. Editing `docs/` or `README.md` won't trigger a slow Docker build.
+
+### Interview Q&A for Tests + CI/CD
+
+> **Q: What's the difference between contract tests and integration tests?**
+> A: "Contract tests verify response shapes (status codes, field presence). Integration tests verify correctness (does the anomaly score make sense?). Contract tests are fast and catch schema regressions. We run both, but contract tests are the CI gate."
+
+> **Q: Why separate CI and Docker workflows?**
+> A: "CI (lint+test) takes ~30 seconds. Docker builds take 3-5 minutes. Developers need fast lint/test feedback on every push. Docker builds only matter when Dockerfiles or source code change — path filtering avoids unnecessary slow builds."
+
+> **Q: How would you add code coverage?**
+> A: "Add `pytest --cov=opspilot --cov-report=xml` and upload to Codecov. Set a coverage threshold (e.g., 70%) as a CI gate. We'd focus coverage on safety.py and graph.py — the most critical modules."
 
 ## Phase 13: Documentation (Steps 46-50)
 - **Step 46**: `README.md` — Flagship repo README with architecture diagram, quickstart, demo GIF.

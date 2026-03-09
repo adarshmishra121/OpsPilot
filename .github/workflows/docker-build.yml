@@ -1,0 +1,43 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "src/**"
+      - "pyproject.toml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "src/**"
+      - "pyproject.toml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api, ui]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f docker/${{ matrix.service }}.Dockerfile \
+            -t opspilot-${{ matrix.service }}:test \
+            .
+
+      - name: Verify image starts
+        run: |
+          docker run --rm -d \
+            --name test-${{ matrix.service }} \
+            -e LLM_PROVIDER=mock \
+            -e AUTH_ENABLED=false \
+            -e DATABASE_URL=sqlite:///test.db \
+            opspilot-${{ matrix.service }}:test
+          sleep 5
+          docker logs test-${{ matrix.service }}
+          docker stop test-${{ matrix.service }}
