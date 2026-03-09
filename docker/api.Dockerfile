@@ -16,13 +16,13 @@ RUN poetry config virtualenvs.create false
 
 # Install Python deps first (layer caching: code changes won't re-trigger install)
 COPY pyproject.toml /app/pyproject.toml
-RUN poetry install --no-interaction --without dev,workflows --no-root
+RUN poetry install --no-interaction --without dev --no-root
 
 # Copy application code
 COPY src /app/src
 
 # Install the project itself (editable)
-RUN poetry install --no-interaction --without dev,workflows --only-root
+RUN poetry install --no-interaction --without dev --only-root
 
 COPY scripts /app/scripts
 

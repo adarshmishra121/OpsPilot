@@ -6,13 +6,13 @@ WORKDIR /app
 RUN pip install --upgrade pip && pip install poetry
 RUN poetry config virtualenvs.create false
 
-# Install deps (with ui extra, without dev/workflows)
+# Install deps (with ui extra, without dev)
 COPY pyproject.toml /app/pyproject.toml
-RUN poetry install --no-interaction --without dev,workflows --no-root -E ui
+RUN poetry install --no-interaction --without dev --no-root -E ui
 
 # Copy application code
 COPY src /app/src
-RUN poetry install --no-interaction --without dev,workflows --only-root
+RUN poetry install --no-interaction --without dev --only-root
 
 COPY ui /app/ui
 
