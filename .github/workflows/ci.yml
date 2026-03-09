@@ -17,10 +17,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Poetry
         run: |
           pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install poetry
+
+      - name: Configure Poetry
+        run: poetry config virtualenvs.create false
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
 
       - name: Lint with ruff
         run: ruff check src/ tests/ scripts/
