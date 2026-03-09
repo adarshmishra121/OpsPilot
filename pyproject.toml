@@ -44,16 +44,23 @@ rank-bm25 = "^0.2.2"
 langgraph = "^0.2.25"
 langchain-core = "^0.2.34"
 
-# --- MLOps ---
-prefect = "^2.20.1"
-evidently = "^0.4.36"
-mlflow = "^2.14.3"
+# --- MLOps (optional — conflicts with drain3's cachetools pin) ---
+# Install with: poetry install --with workflows
+# prefect, evidently, mlflow moved to optional group below
 
 # --- Log parsing ---
 drain3 = "^0.9.11"
 
 # --- Auth ---
 PyJWT = "^2.9.0"
+
+[tool.poetry.group.workflows]
+optional = true
+
+[tool.poetry.group.workflows.dependencies]
+prefect = "^2.20.1"
+evidently = "^0.4.36"
+mlflow = "^2.14.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.2"

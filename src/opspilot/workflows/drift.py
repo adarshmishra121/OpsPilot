@@ -5,8 +5,13 @@ from pathlib import Path
 
 import pandas as pd
 import structlog
-from evidently.report import Report
-from evidently.metric_preset import DataDriftPreset
+
+try:
+    from evidently.report import Report
+    from evidently.metric_preset import DataDriftPreset
+except ImportError:
+    Report = None
+    DataDriftPreset = None
 
 log = structlog.get_logger()
 
@@ -24,6 +29,10 @@ def detect_drift(current_df: pd.DataFrame | None = None) -> dict:
     Returns:
         Dict with drift_detected (bool), drift_score, and per-feature details.
     """
+    if Report is None:
+        log.warning("drift.skip", reason="Evidently not installed. Run: poetry install --with workflows")
+        return {"drift_detected": False, "reason": "evidently not installed"}
+
     if not REFERENCE_PATH.exists():
         log.warning("drift.skip", reason="Reference features not found")
         return {"drift_detected": False, "reason": "no reference data"}

@@ -2,9 +2,12 @@
 
 import subprocess
 import structlog
-from prefect import flow, task
-from prefect.tasks import task_input_hash
-from datetime import timedelta
+
+try:
+    from prefect import flow, task
+except ImportError:
+    flow = None
+    task = None
 
 log = structlog.get_logger()
 

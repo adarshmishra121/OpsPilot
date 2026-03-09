@@ -3448,20 +3448,126 @@ Dedicated tests for the groundedness validator — the most critical safety comp
 
 ### What
 
-GitHub Actions CI pipeline: lint → format check → test on every push.
+GitHub Actions CI pipeline: lint → format check → test on every push. Uses **Poetry** for dependency resolution.
 
 ### Pipeline steps
 
 ```
 git push → GitHub triggers CI
-  ├── ruff check     (catches unused imports, bad patterns)
-  ├── ruff format    (catches inconsistent formatting)
-  └── pytest         (runs all tests with mock LLM + SQLite)
+  ├── Install Poetry         (pip install poetry)
+  ├── Configure Poetry       (no virtualenv in CI — install to system Python)
+  ├── poetry install         (resolves + installs all deps including dev group)
+  ├── ruff check             (catches unused imports, bad patterns)
+  ├── ruff format --check    (catches inconsistent formatting)
+  └── pytest                 (runs all tests with mock LLM + SQLite)
 ```
+
+### Annotated CI YAML
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main]       # Trigger on every push to main
+  pull_request:
+    branches: [main]       # Also trigger on PRs targeting main
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest   # Free GitHub-hosted runner
+    steps:
+      - uses: actions/checkout@v4    # Clone repo
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"     # Match our pyproject.toml requirement
+
+      - name: Install Poetry
+        run: |
+          pip install --upgrade pip
+          pip install poetry          # Poetry has its own dependency resolver
+
+      - name: Configure Poetry
+        run: poetry config virtualenvs.create false
+        # ↑ Don't create a .venv — install directly into system Python
+        # In CI, we don't need isolation (container is throwaway)
+        # This saves time and avoids "poetry run" prefix on every command
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+        # ↑ Poetry reads [tool.poetry.dependencies] AND [tool.poetry.group.dev.dependencies]
+        # This installs ruff, pytest, AND all main deps in one command
+
+      - name: Lint with ruff
+        run: ruff check src/ tests/ scripts/
+
+      - name: Check formatting
+        run: ruff format --check src/ tests/ scripts/
+
+      - name: Run tests
+        env:
+          LLM_PROVIDER: mock          # No Ollama/GPU in CI
+          AUTH_ENABLED: "false"        # No JWT tokens needed
+          DATABASE_URL: "sqlite:///test.db"  # Throwaway SQLite
+        run: pytest tests/ -v --tb=short
+```
+
+### 🐛 Bug Fix Story: Why Poetry instead of pip?
+
+**Original CI used:** `pip install -e ".[dev]"`
+
+**Two failures:**
+
+**Failure 1: `WARNING: opspilot 0.1.0 does not provide the extra 'dev'`**
+```
+# pip looks for this (PEP 621 standard):
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+# But our pyproject.toml has this (Poetry format):
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.5.7"
+pytest = "^8.3.2"
+
+# Result: ruff and pytest were NEVER INSTALLED → lint step would fail
+```
+
+**Failure 2: `error: resolution-too-deep`**
+```
+pip tried to find compatible versions of:
+  mlflow (tried 20+ versions: 2.22.4, 2.22.2, ..., 2.14.3)
+  × langgraph (tried 30+ versions: 0.2.76, 0.2.75, ..., 0.2.42)
+  × langsmith (tried 20+ versions)
+  × faiss-cpu (tried 8 versions)
+
+Each combination triggers another round of resolution.
+After 5 minutes and thousands of combinations → pip gives up.
+```
+
+**Fix:** Switch to `poetry install`
+- Poetry's resolver is purpose-built for complex dependency trees
+- Poetry reads `[tool.poetry.group.dev.dependencies]` correctly
+- Poetry resolves in seconds, not minutes
+
+### pip vs Poetry comparison
+
+| | pip | Poetry |
+|---|---|---|
+| **Config format** | `[project]` (PEP 621) | `[tool.poetry]` |
+| **Dev deps** | `[project.optional-dependencies]` | `[tool.poetry.group.dev]` |
+| **Resolver** | Backtracking (can timeout) | SAT solver (fast for complex trees) |
+| **Lock file** | `requirements.txt` (manual) | `poetry.lock` (auto-generated) |
+| **When pip fails** | Complex dep trees (our case!) | N/A |
 
 ### Why `LLM_PROVIDER=mock` in CI?
 
 CI runners don't have Ollama or GPUs. Mock mode gives deterministic, fast responses. The architecture is tested; only the LLM output differs.
+
+### Why `virtualenvs.create false`?
+
+CI runs in a disposable container. Creating a virtualenv inside a container is redundant — the container IS the isolation. Skipping it saves 5-10 seconds and avoids needing `poetry run` prefix.
 
 ---
 
