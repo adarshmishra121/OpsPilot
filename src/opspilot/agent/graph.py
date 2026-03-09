@@ -64,8 +64,13 @@ def draft_node(state: AgentState) -> dict:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        parsed = {"summary": raw, "actions": [], "verification_steps": [],
-                  "fallback_plan": [], "postmortem_markdown": ""}
+        parsed = {
+            "summary": raw,
+            "actions": [],
+            "verification_steps": [],
+            "fallback_plan": [],
+            "postmortem_markdown": "",
+        }
 
     return {"draft_response": parsed}
 
@@ -75,9 +80,7 @@ def validate_node(state: AgentState) -> dict:
     known_ids = {c["doc_id"] for c in state["retrieved_chunks"]}
     draft = state["draft_response"]
 
-    grounded_actions = validate_grounded_actions(
-        draft.get("actions", []), known_ids
-    )
+    grounded_actions = validate_grounded_actions(draft.get("actions", []), known_ids)
     draft["actions"] = grounded_actions
     return {"final_response": draft}
 

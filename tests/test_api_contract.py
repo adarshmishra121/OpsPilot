@@ -14,10 +14,10 @@ DUMMY_AGENT_RESPONSE = {
         "actions": [{"action": "restart", "description": "Restart"}],
         "verification_steps": [],
         "fallback_plan": [],
-        "postmortem_markdown": "## Mock"
+        "postmortem_markdown": "## Mock",
     },
     "anomaly_result": {"score": 0.5, "top_templates": []},
-    "retrieved_chunks": []
+    "retrieved_chunks": [],
 }
 
 

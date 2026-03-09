@@ -20,7 +20,9 @@ def read_md(path: str) -> str:
 def main() -> None:
     """Chunk all runbooks and build a FAISS index."""
     os.makedirs(OUT_INDEX, exist_ok=True)
-    embed_model = os.getenv("EMBED_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
+    embed_model = os.getenv(
+        "EMBED_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2"
+    )
 
     store = FaissStore(OUT_INDEX, embed_model)
     docs = []
@@ -35,17 +37,21 @@ def main() -> None:
         chunks = simple_md_chunk(title=title, section="body", text=text)
 
         for i, chunk_text in enumerate(chunks):
-            docs.append({
-                "doc_id": f"runbook:{title}:{i}",
-                "title": title,
-                "section": "body",
-                "text": chunk_text,
-                "source": "prometheus-operator-runbooks",
-                "checksum": hashlib.sha256(chunk_text.encode("utf-8")).hexdigest(),
-            })
+            docs.append(
+                {
+                    "doc_id": f"runbook:{title}:{i}",
+                    "title": title,
+                    "section": "body",
+                    "text": chunk_text,
+                    "source": "prometheus-operator-runbooks",
+                    "checksum": hashlib.sha256(chunk_text.encode("utf-8")).hexdigest(),
+                }
+            )
 
     store.build(docs)
-    print(f"Built FAISS index at {OUT_INDEX} — {len(docs)} chunks from {len(md_files)} files")
+    print(
+        f"Built FAISS index at {OUT_INDEX} — {len(docs)} chunks from {len(md_files)} files"
+    )
 
 
 if __name__ == "__main__":

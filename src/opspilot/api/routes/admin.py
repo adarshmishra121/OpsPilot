@@ -33,12 +33,14 @@ def clear_cache():
     cleared = []
     try:
         from opspilot.agent.tools import _get_retriever
+
         _get_retriever.cache_clear()
         cleared.append("retriever")
     except Exception:
         pass
     try:
         from opspilot.anomaly.infer import _load_model, _get_featurizer
+
         _load_model.cache_clear()
         _get_featurizer.cache_clear()
         cleared.append("anomaly_model")

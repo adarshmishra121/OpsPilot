@@ -1,6 +1,5 @@
 """Train IsolationForest on log feature vectors and log results to MLflow."""
 
-
 import os
 import time
 
@@ -23,12 +22,14 @@ def main() -> None:
 
     mlflow.set_experiment("opspilot-anomaly")
     with mlflow.start_run(run_name="isolation-forest"):
-        mlflow.log_params({
-            "n_estimators": N_ESTIMATORS,
-            "contamination": CONTAMINATION,
-            "n_samples": len(X),
-            "n_features": X.shape[1],
-        })
+        mlflow.log_params(
+            {
+                "n_estimators": N_ESTIMATORS,
+                "contamination": CONTAMINATION,
+                "n_samples": len(X),
+                "n_features": X.shape[1],
+            }
+        )
 
         t0 = time.time()
         model = IsolationForest(
@@ -41,12 +42,14 @@ def main() -> None:
         train_time = time.time() - t0
 
         scores = model.decision_function(X)
-        mlflow.log_metrics({
-            "train_time_s": round(train_time, 2),
-            "mean_score": float(np.mean(scores)),
-            "std_score": float(np.std(scores)),
-            "anomaly_pct": float((model.predict(X) == -1).mean()),
-        })
+        mlflow.log_metrics(
+            {
+                "train_time_s": round(train_time, 2),
+                "mean_score": float(np.mean(scores)),
+                "std_score": float(np.std(scores)),
+                "anomaly_pct": float((model.predict(X) == -1).mean()),
+            }
+        )
 
         os.makedirs(os.path.dirname(MODEL_OUT), exist_ok=True)
         joblib.dump(model, MODEL_OUT)

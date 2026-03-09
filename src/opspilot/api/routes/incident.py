@@ -27,9 +27,7 @@ def analyze_incident(req: IncidentRequest):
         retrieved_context=[
             RetrievedChunk(**c) for c in result.get("retrieved_chunks", [])
         ],
-        actions=[
-            RecommendedAction(**a) for a in final.get("actions", [])
-        ],
+        actions=[RecommendedAction(**a) for a in final.get("actions", [])],
         verification_steps=final.get("verification_steps", []),
         fallback_plan=final.get("fallback_plan", []),
         postmortem_markdown=final.get("postmortem_markdown", ""),

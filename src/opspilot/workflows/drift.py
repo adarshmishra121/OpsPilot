@@ -30,7 +30,10 @@ def detect_drift(current_df: pd.DataFrame | None = None) -> dict:
         Dict with drift_detected (bool), drift_score, and per-feature details.
     """
     if Report is None:
-        log.warning("drift.skip", reason="Evidently not installed. Run: poetry install --with workflows")
+        log.warning(
+            "drift.skip",
+            reason="Evidently not installed. Run: poetry install --with workflows",
+        )
         return {"drift_detected": False, "reason": "evidently not installed"}
 
     if not REFERENCE_PATH.exists():
@@ -45,7 +48,9 @@ def detect_drift(current_df: pd.DataFrame | None = None) -> dict:
         split = int(len(reference) * 0.8)
         current_df = reference.iloc[split:].reset_index(drop=True)
         reference = reference.iloc[:split].reset_index(drop=True)
-        log.info("drift.simulated_split", ref_size=len(reference), cur_size=len(current_df))
+        log.info(
+            "drift.simulated_split", ref_size=len(reference), cur_size=len(current_df)
+        )
 
     # Ensure matching columns
     common_cols = list(set(reference.columns) & set(current_df.columns))

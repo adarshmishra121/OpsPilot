@@ -21,7 +21,5 @@ class BM25Index:
         tokens = query.lower().split()
         scores = self._bm25.get_scores(tokens)
 
-        ranked = sorted(
-            zip(self._doc_ids, scores), key=lambda x: x[1], reverse=True
-        )
+        ranked = sorted(zip(self._doc_ids, scores), key=lambda x: x[1], reverse=True)
         return {doc_id: float(s) for doc_id, s in ranked[:top_k] if s > 0}

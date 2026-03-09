@@ -41,7 +41,7 @@ for mod in modules:
         print(f"  ❌ {mod}: {e}")
         errors.append((mod, str(e)))
 
-print(f"\n{'='*50}")
+print(f"\n{'=' * 50}")
 if errors:
     print(f"❌ {len(errors)} import(s) FAILED:")
     for mod, err in errors:

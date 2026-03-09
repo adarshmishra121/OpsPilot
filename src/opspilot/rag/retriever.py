@@ -46,20 +46,21 @@ class HybridRetriever:
         all_ids = set(vec_norm) | set(bm25_norm)
         fused = {}
         for doc_id in all_ids:
-            fused[doc_id] = (
-                self.alpha * vec_norm.get(doc_id, 0.0)
-                + (1 - self.alpha) * bm25_norm.get(doc_id, 0.0)
-            )
+            fused[doc_id] = self.alpha * vec_norm.get(doc_id, 0.0) + (
+                1 - self.alpha
+            ) * bm25_norm.get(doc_id, 0.0)
 
         ranked = sorted(fused.items(), key=lambda x: x[1], reverse=True)[:top_k]
 
         results = []
         for doc_id, score in ranked:
             doc = self.docstore.get(doc_id) or {}
-            results.append({
-                "doc_id": doc_id,
-                "title": doc.get("title", ""),
-                "text": doc.get("text", ""),
-                "score": round(score, 4),
-            })
+            results.append(
+                {
+                    "doc_id": doc_id,
+                    "title": doc.get("title", ""),
+                    "text": doc.get("text", ""),
+                    "score": round(score, 4),
+                }
+            )
         return results

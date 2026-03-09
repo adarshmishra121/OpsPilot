@@ -26,11 +26,13 @@ def main() -> None:
             if not line:
                 continue
             result = miner.add_log_message(line)
-            records.append({
-                "line": line,
-                "cluster_id": result["cluster_id"],
-                "template": result["template_mined"],
-            })
+            records.append(
+                {
+                    "line": line,
+                    "cluster_id": result["cluster_id"],
+                    "template": result["template_mined"],
+                }
+            )
 
     df = pd.DataFrame(records)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)

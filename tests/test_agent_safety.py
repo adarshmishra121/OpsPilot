@@ -8,7 +8,9 @@ class TestGroundedActions:
 
     def test_grounded_action_passes(self):
         """Action citing a real doc_id should survive validation."""
-        actions = [{"action": "Clear /tmp", "evidence_doc_ids": ["runbook:NodeDiskFull:0"]}]
+        actions = [
+            {"action": "Clear /tmp", "evidence_doc_ids": ["runbook:NodeDiskFull:0"]}
+        ]
         retrieved_ids = {"runbook:NodeDiskFull:0", "runbook:NodeDiskFull:1"}
         result = validate_grounded_actions(actions, retrieved_ids)
         assert len(result) == 1

@@ -55,15 +55,23 @@ def call_llm(prompt: str) -> str:
 
 def _mock_response() -> str:
     """Return a deterministic mock response for testing."""
-    return json.dumps({
-        "summary": "Mock analysis: elevated error rates detected in log patterns.",
-        "actions": [
-            {
-                "action": "Review disk usage and clear temporary files on affected nodes.",
-                "evidence_doc_ids": ["runbook:mock:0"],
-            }
-        ],
-        "verification_steps": ["Check disk usage with df -h", "Verify service health"],
-        "fallback_plan": ["Escalate to on-call lead", "Roll back recent deployments"],
-        "postmortem_markdown": "## Incident Summary\n\nMock postmortem for testing.",
-    })
+    return json.dumps(
+        {
+            "summary": "Mock analysis: elevated error rates detected in log patterns.",
+            "actions": [
+                {
+                    "action": "Review disk usage and clear temporary files on affected nodes.",
+                    "evidence_doc_ids": ["runbook:mock:0"],
+                }
+            ],
+            "verification_steps": [
+                "Check disk usage with df -h",
+                "Verify service health",
+            ],
+            "fallback_plan": [
+                "Escalate to on-call lead",
+                "Roll back recent deployments",
+            ],
+            "postmortem_markdown": "## Incident Summary\n\nMock postmortem for testing.",
+        }
+    )

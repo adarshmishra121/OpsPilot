@@ -37,6 +37,7 @@ def get_current_user(
 
 def require_role(role: str):
     """Factory that returns a dependency requiring a specific role."""
+
     def checker(user: Dict[str, Any] = Depends(get_current_user)):
         if user.get("role") != role:
             raise HTTPException(
@@ -44,4 +45,5 @@ def require_role(role: str):
                 detail=f"Role '{role}' required",
             )
         return user
+
     return checker

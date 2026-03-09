@@ -59,14 +59,19 @@ def evaluate():
     mrr = sum(reciprocal_ranks) / len(reciprocal_ranks)
     avg_recall = sum(recalls) / len(recalls)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  MRR:        {mrr:.4f}")
     print(f"  Recall@{TOP_K}:  {avg_recall:.4f}")
     print(f"  Queries:    {len(gold)}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Write metrics for DVC tracking
-    metrics = {"mrr": round(mrr, 4), "recall_at_k": round(avg_recall, 4), "k": TOP_K, "n_queries": len(gold)}
+    metrics = {
+        "mrr": round(mrr, 4),
+        "recall_at_k": round(avg_recall, 4),
+        "k": TOP_K,
+        "n_queries": len(gold),
+    }
     Path("artifacts").mkdir(exist_ok=True)
     with open("artifacts/eval_metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
