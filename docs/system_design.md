@@ -68,6 +68,20 @@ OpsPilot is an AI-powered incident response copilot that combines:
 - Every suggested action MUST cite a retrieved document as evidence
 - Actions without evidence are silently filtered out
 - Better to suggest fewer actions than suggest wrong/dangerous ones
+### ADR-6: Why Prefect/Evidently/MLflow Are External Dependencies
+
+**Context:** CI and Docker builds fail because `drain3` pins `cachetools==4.2.1` (exact version) while `prefect` requires `cachetools>=5.3`. Poetry resolves ALL dependency groups — even optional ones — at resolution time, making `--without` ineffective for version conflicts.
+
+**Decision:** Remove `prefect`, `evidently`, and `mlflow` from `pyproject.toml` entirely. Install them via `pip install prefect evidently mlflow` only when running MLOps workflows.
+
+**Rationale:**
+- Poetry `--without` only controls installation, not resolution — optional groups still cause resolver failures
+- The core application (API, agent, RAG, anomaly) does NOT need these packages at runtime
+- `prefect_flows.py` and `drift.py` use try-except import wrappers for graceful degradation
+- CI and Docker builds stay fast and conflict-free
+- MLOps engineers install the extra packages in their own environments
+
+**Tradeoff:** MLOps dependencies are not lockfile-pinned, so version drift is possible in workflow environments. Mitigated by documenting exact install commands.
 
 ## Data Flow Diagram
 

@@ -140,9 +140,11 @@ docs/               ← Documentation
 
 ### Minute 8-10: Testing, CI/CD, and MLOps
 
-> "Testing has two layers. **Contract tests** verify every endpoint returns the right response shape — status codes, required fields. **Safety tests** specifically test the groundedness validator with six edge cases: valid evidence, fake doc_ids, empty evidence, mixed valid/invalid, empty action list, and empty retrieval context.
+> "Testing has two layers. **Contract tests** verify every endpoint returns the right response shape — status codes, required fields. The incident analysis tests mock the agent pipeline so they validate the API contract without requiring a real LLM or trained models. **Safety tests** specifically test the groundedness validator with six edge cases: valid evidence, fake doc_ids, empty evidence, mixed valid/invalid, empty action list, and empty retrieval context.
 >
-> CI runs on every push via GitHub Actions: ruff lint, ruff format check, pytest. Docker builds are a separate workflow — they only trigger when Dockerfiles or source code change, with a matrix strategy that builds API and UI images in parallel.
+> CI runs on every push via GitHub Actions: **three gates** — ruff lint (catches unused imports, bad patterns), ruff format check (enforces consistent code style), and pytest (runs all contract and safety tests). Docker builds are a separate workflow — they use Poetry for dependency management, with a matrix strategy that builds API and UI images in parallel.
+>
+> A key CI lesson: Poetry resolves ALL dependency groups at resolution time, even optional ones. We had an irreconcilable conflict — `drain3` pins `cachetools==4.2.1` but `prefect` requires `cachetools>=5.3`. The fix was removing prefect/evidently/mlflow from pyproject.toml entirely and installing them separately via pip when running MLOps workflows.
 >
 > For MLOps: every training run logs hyperparameters and metrics to MLflow. The DVC pipeline tracks data versions. I have an evaluation script that measures retrieval quality with MRR and Recall@K against a 12-query gold standard dataset. Evidently monitors feature distribution drift — if incoming logs shift significantly from training data, it flags the model for retraining. Prefect flows automate nightly reindexing and weekly retraining.
 >
@@ -485,6 +487,19 @@ Client → [JWT Token in Header] → FastAPI
 
 ## 🟢 MINOR TRADEOFFS (show completeness)
 
+### 16. Poetry vs pip for Dependency Management
+
+| | Poetry (we chose) | pip + requirements.txt |
+|---|---|---|
+| **Lockfile** | ✅ `poetry.lock` — exact transitive versions | ❌ Must manually freeze with `pip freeze` |
+| **Dependency groups** | ✅ dev, optional, extras — per-group control | ❌ Separate files (requirements-dev.txt) |
+| **Resolver** | SAT solver — fails fast on conflicts | Backtracking — can take forever or silently break |
+| **Reproducibility** | ✅ Same versions everywhere (CI, Docker, local) | ⚠️ Depends on discipline with `pip freeze` |
+| **Resolution gotcha** | ⚠️ Resolves ALL groups (even optional/excluded) | N/A |
+| **When to pick pip** | Simple scripts, Lambda/Cloud Functions, projects with zero transitive dep conflicts |
+
+> **Interview line:** "We switched to Poetry after pip's resolver exploded on the drain3/cachetools/prefect conflict. Poetry's SAT solver gave us a clear, deterministic error. The lockfile ensures every environment — CI, Docker, local dev — gets identical versions. The one gotcha: Poetry resolves everything globally, so truly conflicting deps must be removed, not just excluded."
+
 ### 11. FastAPI vs Flask vs Django
 
 | | FastAPI (we chose) | Flask | Django |
@@ -719,6 +734,57 @@ Retrain on representative production logs before deployment. Add a "vocabulary o
 
 ### Lesson
 > **Interview line:** "Drift detection is only meaningful when training and production data come from the same distribution family. Before deploying an anomaly model to a new environment, I now check vocabulary overlap first. If overlap is below 30%, the model needs retraining — that's not drift, that's a deployment mistake."
+
+---
+
+## Story 4: "The Irreconcilable Dependency Conflict"
+
+### Situation
+CI pipeline failed on every push. `poetry install` crashed with a wall of text about `cachetools` version conflicts. Docker builds failed too. Seven fix-push-fail cycles before finding the root cause.
+
+### Investigation
+```
+Step 1: Read the error message
+  → "Because drain3 (0.9.11) depends on cachetools (==4.2.1)
+     and prefect (>=2.20.1) depends on cachetools (>=5.3),
+     they are incompatible."
+  → drain3 PINS cachetools to exactly 4.2.1
+  → prefect REQUIRES cachetools 5.3 or higher
+  → Impossible to satisfy both ❌
+
+Step 2: Try making prefect/evidently/mlflow an optional group
+  → [tool.poetry.group.workflows]
+  → optional = true
+  → Run: poetry install --without workflows
+  → STILL FAILS ❌
+  → Why? Poetry resolves ALL groups at resolution time, even optional ones.
+     --without only controls installation, not resolution.
+
+Step 3: Try pip instead of poetry in Docker
+  → pip install -e ".[dev]"
+  → ALSO FAILS with different error: pip's resolver hits the same conflict
+
+Step 4: Remove conflicting packages entirely
+  → Delete [tool.poetry.group.workflows] from pyproject.toml
+  → poetry install → SUCCESS ✅
+  → Add try-except wrappers in prefect_flows.py and drift.py
+  → Import prefect/evidently gracefully falls back when not installed
+```
+
+### Root Cause
+Poetry's dependency resolver validates ALL declared groups — even optional ones — before generating the lockfile. The `--without` flag only controls which packages get *installed*, not which get *resolved*. If two packages have irreconcilable version pins (`cachetools==4.2.1` vs `cachetools>=5.3`), the ONLY fix is complete removal from the lockfile scope.
+
+### Additional Cascading Issues Fixed
+- **Docker `COPY models/`** failed because `models/` is gitignored → replaced with `RUN mkdir -p`
+- **Docker `--only-root` + `--without dev`** incompatible in Poetry → switched to `--only main`
+- **6 ruff lint errors** (unused imports, `== True` comparison) → fixed with `ruff check --fix` + manual edit
+- **`ruff format --check`** failed on 15 files → ran `ruff format` across entire codebase
+- **pytest `ModuleNotFoundError`** → added `pythonpath = ["src"]` to `[tool.pytest.ini_options]`
+- **Incident tests crashed calling real LLM** → mocked `agent.invoke` with `unittest.mock.patch`
+- **BM25 `ZeroDivisionError`** on empty corpus → added early return guard
+
+### Lesson
+> **Interview line:** "This taught me that Poetry's `--without` is NOT an isolation mechanism — it's just an install filter. Resolution happens globally. If you have irreconcilable conflicts, the only option is removing the conflicting packages from the dependency specification entirely. We now install prefect/evidently/mlflow separately via pip when running MLOps workflows. The core project stays conflict-free and CI-clean."
 
 ---
 
@@ -1287,9 +1353,11 @@ Each has a one-line module docstring (PEP 257 best practice):
 ## Step 2: `pyproject.toml`
 
 ### What
-The single config file that tells Python what your project is, what dependencies it needs, and how to install it.
+The single config file that tells Python what your project is, what dependencies it needs, and how to install it. We use **Poetry** as the dependency manager (not raw pip).
 
 ### Key dependency groups and why each library exists
+
+**Core dependencies** (in `[tool.poetry.dependencies]`):
 
 | Library | What it does | Why OpsPilot needs it |
 |---------|-------------|----------------------|
@@ -1310,25 +1378,52 @@ The single config file that tells Python what your project is, what dependencies
 | `faiss-cpu` | Vector search | Fast similarity search — our vector store |
 | `rank-bm25` | Lexical search | BM25 keyword matching (complements vector search) |
 | `langgraph` | Agent framework | Builds our state machine agent |
-| `mlflow` | Experiment tracking | Logs params, metrics, model artifacts |
 | `drain3` | Log template mining | Parses raw logs into templates (anomaly detection) |
-| `prefect` | Workflow orchestration | Schedules nightly reindex, drift check jobs |
-| `evidently` | Drift detection | Detects when data distribution shifts |
 | `PyJWT` | JWT tokens | Auth token decoding for RBAC |
+
+**External installs** (NOT in pyproject.toml — installed separately via pip when needed):
+
+| Library | What it does | Why NOT in pyproject.toml |
+|---------|-------------|---------------------------|
+| `prefect` | Workflow orchestration | **Irreconcilable dependency conflict:** `drain3` pins `cachetools==4.2.1`, `prefect` needs `cachetools>=5.3`. Poetry's resolver fails even if the group is marked optional. |
+| `evidently` | Drift detection | Same conflict chain — evidently pulls in packages that conflict with drain3's pinned cachetools. |
+| `mlflow` | Experiment tracking | Same ecosystem — install alongside prefect/evidently when running MLOps workflows. |
+
+> **⚠️ CI/Docker Lesson Learned:** Poetry resolves ALL dependency groups at resolution time — even optional/excluded ones. The `--without` flag only controls what gets *installed*, not what gets *resolved*. If two groups have irreconcilable version conflicts, the ONLY fix is to remove the conflicting packages from `pyproject.toml` entirely. We learned this the hard way across 7 debug-fix-push cycles.
+
+**Dev dependencies** (in `[tool.poetry.group.dev.dependencies]`):
+
+| Library | What it does |
+|---------|-------------|
+| `pytest` | Test runner |
+| `pytest-asyncio` | Async test support |
+| `ruff` | Linter + formatter (replaces flake8, black, isort) |
+| `mypy` | Static type checker |
+| `types-PyYAML` | Type stubs for PyYAML |
+
+### Pytest configuration
+```toml
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+```
+This tells pytest where to find the `opspilot` package. Without it, `from opspilot.api.main import app` fails with `ModuleNotFoundError` during test collection.
 
 ### Critical line explained
 ```toml
 packages = [{ include = "opspilot", from = "src" }]
 ```
-This tells pip: "When someone does `from opspilot.api.main import app`, look inside `src/opspilot/`." Without this, Python can't find your code.
+This tells Poetry: "When someone does `from opspilot.api.main import app`, look inside `src/opspilot/`." Without this, Python can't find your code.
 
 ### Version pinning with `^`
 `"^0.112.0"` means "at least 0.112.0, up to (but not including) the next major version." This prevents breaking changes while allowing patches.
 
 ### Interview Q&A
 
-> **Q: Why use `pyproject.toml` instead of `requirements.txt`?**
-> A: "`pyproject.toml` is the modern standard (PEP 621). It replaces `setup.py`, `setup.cfg`, and `requirements.txt` in a single file. It defines project metadata, dependencies, build system, and tool config (ruff, mypy) all in one place. `requirements.txt` only lists dependencies — no metadata, no build config."
+> **Q: Why use `pyproject.toml` with Poetry instead of `requirements.txt`?**
+> A: "`pyproject.toml` is the modern standard (PEP 621). Poetry adds a lockfile (`poetry.lock`) for reproducible installs — every developer and CI server gets identical versions. `requirements.txt` only lists top-level dependencies — no transitive version locking, no groups, no build config."
+
+> **Q: Why are prefect/evidently/mlflow not in pyproject.toml?**
+> A: "Irreconcilable dependency conflict. `drain3` pins `cachetools==4.2.1` (exact version). `prefect` requires `cachetools>=5.3`. Poetry's resolver validates ALL groups — even optional ones — before installing anything. The `--without` flag only skips installation, not resolution. The only solution is complete removal from the lockfile scope. These packages are installed separately via `pip install prefect evidently mlflow` when you need the MLOps workflows."
 
 > **Q: Why editable install (`pip install -e .`)?**
 > A: "Editable mode means Python uses your source files directly instead of copying them to site-packages. When you edit `src/opspilot/api/main.py`, the changes take effect immediately — no reinstall needed. Essential for development."
@@ -1412,13 +1507,36 @@ DATABASE_URL: postgresql+psycopg://opspilot:opspilot@postgres:5432/opspilot
 
 ### `docker/api.Dockerfile` — API container
 
-**Layer caching optimization**:
+**Uses Poetry (not pip) for reliable dependency resolution:**
 ```dockerfile
-COPY pyproject.toml /app/pyproject.toml   # Step 1: Copy deps file (changes rarely)
-RUN pip install -e ".[api]"               # Step 2: Install deps (slow, but cached!)
-COPY src /app/src                         # Step 3: Copy code (changes often)
+# Install Poetry
+RUN pip install --upgrade pip && pip install poetry
+RUN poetry config virtualenvs.create false
+
+# Install Python deps first (layer caching: code changes won't re-trigger install)
+COPY pyproject.toml /app/pyproject.toml
+RUN poetry install --no-interaction --without dev --no-root
+
+# Copy application code
+COPY src /app/src
+RUN poetry install --no-interaction --without dev --only main
+
+# Create dirs for runtime data (gitignored, populated via DVC/volume mounts)
+RUN mkdir -p /app/artifacts /app/models
 ```
-If you only change source code, Docker reuses the cached pip install layer → **fast rebuilds**.
+
+**Key Docker decisions:**
+- **Poetry over pip**: pip's resolver often fails on complex dependency trees (e.g., `cachetools` conflict). Poetry's lockfile guarantees reproducible installs.
+- **`--without dev`**: Excludes test/lint tools from production image (smaller, faster).
+- **`mkdir -p` instead of `COPY models`**: `models/` and `artifacts/` are gitignored (DVC-tracked). They don't exist in the repo. Docker `COPY` fails on missing dirs. We create empty dirs and populate them at runtime.
+- **`virtualenvs.create false`**: Installs directly into the system Python (no venv overhead inside a container).
+
+### `docker/ui.Dockerfile` — UI container
+
+```dockerfile
+RUN poetry install --no-interaction --without dev --no-root -E ui
+```
+The `-E ui` flag installs the optional `streamlit` extra. Same Poetry-based approach as the API.
 
 ### Interview Q&A for Docker
 
@@ -1430,6 +1548,12 @@ If you only change source code, Docker reuses the cached pip install layer → *
 
 > **Q: Why separate Dockerfiles for API and UI?**
 > A: "They have different base images and dependencies. The API needs Python with ML libraries. The UI needs Python with Streamlit. Separate images are smaller and faster to build. Also, in production, they scale independently — you might need 5 API replicas but only 1 UI."
+
+> **Q: Why Poetry instead of pip in Dockerfiles?**
+> A: "pip's dependency resolver is 'best effort' — it can silently install incompatible versions or fail with cryptic `resolution-too-deep` errors. Poetry uses a SAT solver and lockfile. If it resolves, it's guaranteed correct. We hit this exact issue when pip couldn't resolve the drain3/cachetools conflict that Poetry handled cleanly."
+
+> **Q: Why `mkdir -p` instead of `COPY models/`?**
+> A: "`models/` and `artifacts/` are gitignored and DVC-tracked — they don't exist in the git repo. Docker's `COPY` command fails if the source directory doesn't exist. We create empty directories that get populated at runtime via DVC pull or volume mounts."
 
 ### `docker/prometheus.yml` — Scrape config
 
