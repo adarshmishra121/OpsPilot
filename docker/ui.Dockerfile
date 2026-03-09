@@ -12,7 +12,7 @@ RUN poetry install --no-interaction --without dev --no-root -E ui
 
 # Copy application code
 COPY src /app/src
-RUN poetry install --no-interaction --without dev --only-root
+RUN poetry install --no-interaction --without dev --only main -E ui
 
 COPY ui /app/ui
 

@@ -22,7 +22,7 @@ RUN poetry install --no-interaction --without dev --no-root
 COPY src /app/src
 
 # Install the project itself (editable)
-RUN poetry install --no-interaction --without dev --only-root
+RUN poetry install --no-interaction --without dev --only main
 
 COPY scripts /app/scripts
 

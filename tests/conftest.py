@@ -1,6 +1,5 @@
 """Shared pytest fixtures for OpsPilot test suite."""
 
-import os
 import pytest
 
 

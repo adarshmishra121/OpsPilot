@@ -5,7 +5,6 @@ from functools import lru_cache
 from typing import Any, Dict, List
 
 import joblib
-import numpy as np
 
 from opspilot.anomaly.features import LogFeaturizer
 

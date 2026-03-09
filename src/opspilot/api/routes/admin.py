@@ -53,7 +53,7 @@ def feedback_stats(session: Session = Depends(get_session)):
     """Aggregate feedback metrics for quality monitoring."""
     total = session.exec(select(func.count(FeedbackRow.id))).one()
     helpful = session.exec(
-        select(func.count(FeedbackRow.id)).where(FeedbackRow.helpful == True)
+        select(func.count(FeedbackRow.id)).where(FeedbackRow.helpful)
     ).one()
     return {
         "total_feedback": total,

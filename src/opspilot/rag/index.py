@@ -5,7 +5,6 @@ import os
 from typing import Any, Dict, List
 
 import faiss
-import numpy as np
 
 from opspilot.embeddings.encoder import Embedder
 

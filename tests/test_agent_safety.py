@@ -1,6 +1,5 @@
 """Tests for agent safety: groundedness validation must reject ungrounded actions."""
 
-import pytest
 from opspilot.agent.safety import validate_grounded_actions
 
 
