@@ -10,15 +10,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps first (layer caching: code changes won't re-trigger pip)
+# Install Poetry (handles complex dep resolution better than pip)
+RUN pip install --upgrade pip && pip install poetry
+RUN poetry config virtualenvs.create false
+
+# Install Python deps first (layer caching: code changes won't re-trigger install)
 COPY pyproject.toml /app/pyproject.toml
-RUN pip install --upgrade pip && pip install -e ".[api]"
+RUN poetry install --no-interaction --without dev,workflows --no-root
 
 # Copy application code
 COPY src /app/src
+
+# Install the project itself (editable)
+RUN poetry install --no-interaction --without dev,workflows --only-root
+
 COPY scripts /app/scripts
-COPY artifacts /app/artifacts
-COPY models /app/models
+
+# Create artifact/model dirs (populated at runtime via DVC or volume mounts)
+RUN mkdir -p /app/artifacts /app/models
 
 EXPOSE 8000
 
