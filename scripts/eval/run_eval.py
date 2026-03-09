@@ -70,7 +70,7 @@ def evaluate():
     Path("artifacts").mkdir(exist_ok=True)
     with open("artifacts/eval_metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
-    print(f"\n✅ Metrics saved to artifacts/eval_metrics.json")
+    print("\n✅ Metrics saved to artifacts/eval_metrics.json")
 
 
 if __name__ == "__main__":

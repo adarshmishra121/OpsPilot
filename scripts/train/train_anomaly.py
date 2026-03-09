@@ -1,6 +1,6 @@
 """Train IsolationForest on log feature vectors and log results to MLflow."""
 
-import json
+
 import os
 import time
 
