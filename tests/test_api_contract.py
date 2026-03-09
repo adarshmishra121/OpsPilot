@@ -1,10 +1,24 @@
 """API contract tests: verify every endpoint returns correct schemas."""
 
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from opspilot.api.main import app
 
 client = TestClient(app)
+
+# Dummy successful agent response matching the schema
+DUMMY_AGENT_RESPONSE = {
+    "final_response": {
+        "summary": "Mock summary",
+        "actions": [{"action": "restart", "description": "Restart"}],
+        "verification_steps": [],
+        "fallback_plan": [],
+        "postmortem_markdown": "## Mock"
+    },
+    "anomaly_result": {"score": 0.5, "top_templates": []},
+    "retrieved_chunks": []
+}
 
 
 class TestHealthEndpoint:
@@ -20,7 +34,9 @@ class TestHealthEndpoint:
 
 
 class TestIncidentEndpoint:
-    def test_analyze_returns_200(self):
+    @patch("opspilot.api.routes.incident.agent.invoke")
+    def test_analyze_returns_200(self, mock_invoke):
+        mock_invoke.return_value = DUMMY_AGENT_RESPONSE
         payload = {
             "incident_id": "INC-TEST-001",
             "alert_title": "TestAlert",
@@ -30,7 +46,9 @@ class TestIncidentEndpoint:
         resp = client.post("/incident/analyze", json=payload)
         assert resp.status_code == 200
 
-    def test_analyze_response_shape(self):
+    @patch("opspilot.api.routes.incident.agent.invoke")
+    def test_analyze_response_shape(self, mock_invoke):
+        mock_invoke.return_value = DUMMY_AGENT_RESPONSE
         payload = {
             "incident_id": "INC-TEST-002",
             "alert_title": "TestAlert",
@@ -53,9 +71,10 @@ class TestRAGEndpoint:
         resp = client.post("/rag/search", json={"query": "disk full", "top_k": 3})
         assert resp.status_code == 200
 
-    def test_search_response_is_list(self):
+    def test_search_response_has_chunks(self):
         resp = client.post("/rag/search", json={"query": "test"})
-        assert isinstance(resp.json(), list)
+        assert "chunks" in resp.json()
+        assert isinstance(resp.json()["chunks"], list)
 
 
 class TestFeedbackEndpoint:

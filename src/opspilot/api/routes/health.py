@@ -8,4 +8,4 @@ router = APIRouter()
 @router.get("/health", tags=["health"])
 def health():
     """Returns 200 if the API is up and accepting requests."""
-    return {"status": "ok"}
+    return {"status": "ok", "version": "0.1.0"}

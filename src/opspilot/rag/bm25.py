@@ -10,11 +10,14 @@ class BM25Index:
 
     def __init__(self, texts: List[str], doc_ids: List[str]):
         self._doc_ids = doc_ids
-        tokenised = [t.lower().split() for t in texts]
+        tokenised = [t.lower().split() for t in texts] if texts else [[""]]
         self._bm25 = BM25Okapi(tokenised)
 
     def search(self, query: str, top_k: int = 6) -> Dict[str, float]:
         """Return {doc_id: score} for the top-k keyword matches."""
+        if not self._doc_ids:
+            return {}
+
         tokens = query.lower().split()
         scores = self._bm25.get_scores(tokens)
 
