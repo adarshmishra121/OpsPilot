@@ -20,7 +20,7 @@
 | Phase 10: Evaluation + DVC | Steps 37-39 | ✅ Complete | `feat: add RAG evaluation, gold set, and DVC pipeline` |
 | Phase 11: Prefect Workflows | Steps 40-41 | ✅ Complete | `feat: add Prefect workflows and Evidently drift detection` |
 | Phase 12: Tests + CI/CD | Steps 42-45 | ✅ Complete | `feat: add tests and CI/CD pipelines` |
-| Phase 13: Documentation | Steps 46-50 | ⬜ Not started | |
+| Phase 13: Documentation | Steps 46-50 | ✅ Complete | `docs: add README, system design, examples, bootstrap, pre-commit` |
 | Phase 14: Verification & Ship | Steps 51-57 | ⬜ Not started | |
 
 ---
@@ -389,6 +389,39 @@ app = create_app()
 
 **Why factory?** In tests, call `create_app()` to get a **fresh** app instance with zero leftover state.
 
+### Key Code — Line by Line
+
+```python
+def create_app() -> FastAPI:                    # Returns a FastAPI instance
+    configure_logging()                           # Set up structlog (JSON logs)
+
+    app = FastAPI(
+        title="OpsPilot API",                     # Shows in Swagger docs header
+        version="0.1.0",                          # API version (semantic versioning)
+        description="Incident Response Copilot",  # Shows in Swagger docs
+    )
+
+    # Register route groups — each file handles its own URL prefix
+    app.include_router(health_router)             # /health (no prefix)
+    app.include_router(incident_router,
+                       prefix="/incident",        # All routes in incident.py get /incident/*
+                       tags=["incident"])          # Groups in Swagger docs
+    app.include_router(rag_router, prefix="/rag", tags=["rag"])
+    app.include_router(anomaly_router, prefix="/anomaly", tags=["anomaly"])
+    app.include_router(feedback_router, prefix="/feedback", tags=["feedback"])
+    app.include_router(admin_router, prefix="/admin", tags=["admin"])
+
+    instrument_app(app)                           # Auto-adds /metrics endpoint
+    return app
+
+app = create_app()                                # Module-level: uvicorn finds this
+```
+
+### When is this code executed?
+
+1. `uvicorn opspilot.api.main:app` → Python imports `main.py` → `create_app()` runs → `app` is ready
+2. Every HTTP request → uvicorn passes it to `app` → FastAPI matches URL to router → calls handler function
+
 ### What are Routers?
 
 Instead of putting all endpoints in one file, we split them into focused files:
@@ -501,9 +534,22 @@ FastAPI auto-generates interactive API docs at `http://localhost:8000/docs`. Eve
 3. **Monitoring** tools check uptime
 4. **First debugging step** — "Does /health work?" If yes, server is up. If no, server crashed.
 
----
+### Key Code — Line by Line (`health.py`)
 
-## Step 9: `src/opspilot/observability/logging.py`
+```python
+@router.get("/health")              # Responds to GET http://localhost:8000/health
+def health():                       # No parameters = no input needed
+    return {                        # FastAPI auto-converts dict → JSON
+        "status": "ok",             # Docker healthcheck looks for this
+        "version": "0.1.0",         # Helps debug: "which version is deployed?"
+    }
+```
+
+### When is this called?
+
+- **Docker**: Every 30s via `HEALTHCHECK` in Dockerfile → restarts container if it fails 3 times
+- **Load balancer**: Checks which API instances are alive → routes traffic only to healthy ones
+- **Developer**: First thing to check → `curl http://localhost:8000/health`
 
 ### What is structured logging?
 
@@ -556,7 +602,28 @@ Exposes GET /metrics  ←───  Scrapes every 10s    ───────�
 (text format)               Stores time-series              Queries with PromQL
 ```
 
-### Why we exclude `/health` from metrics
+### Key Code — Line by Line (`metrics.py`)
+
+```python
+from prometheus_fastapi_instrumentator import Instrumentator
+
+def instrument_app(app: FastAPI):
+    Instrumentator(
+        excluded_handlers=["/health", "/metrics"],  # Don't track these
+    ).instrument(app)                                # Wraps every route
+     .expose(app)                                    # Adds GET /metrics endpoint
+```
+
+### What appears at `/metrics`?
+
+```
+# HELP http_request_duration_seconds Duration of HTTP requests
+http_request_duration_seconds_bucket{handler="/incident/analyze",method="POST",le="0.1"} 42
+http_request_duration_seconds_bucket{handler="/incident/analyze",method="POST",le="0.5"} 95
+http_request_duration_seconds_count{handler="/incident/analyze",method="POST"} 100
+```
+
+Prometheus scrapes this every 10s → Grafana displays it as charts.
 
 Health checks happen every 10 seconds per container. With 8 containers, that's 48 health checks/minute → floods metrics with noise, making real API trends invisible.
 
@@ -598,12 +665,39 @@ scripts/data/download_all.py
             └── Copy *.md → data/raw/runbooks/ (DVC-tracked)
 ```
 
-### Key design decisions
+### Key Code — Line by Line (`download_all.py`)
 
-1. **`--depth 1`** — shallow clone saves time (no full git history needed)
-2. **`ensure_repo()`** — idempotent: clones first time, pulls updates after
-3. **`external/` vs `data/raw/`** — external is gitignored temp storage, data/raw is DVC-tracked versioned data
-4. **`Path(__file__).resolve().parents[2]`** — gets project root regardless of where you run the script from
+```python
+def ensure_repo(name: str, url: str, dest: Path):
+    """Clone if first time, pull if already exists."""
+    if dest.exists():                          # Already cloned before?
+        subprocess.run(                        # Yes → just update
+            ["git", "-C", str(dest), "pull"],   # -C = run git in that directory
+            check=True,                        # Raises error if git fails
+        )
+    else:
+        subprocess.run(                        # No → fresh clone
+            ["git", "clone", "--depth", "1",    # --depth 1 = only latest commit
+             url, str(dest)],                  # Clone url into dest folder
+            check=True,
+        )
+```
+
+### When do you run this?
+
+```bash
+python scripts/data/download_all.py  # Manual: run once to get data
+dvc repro                             # Automated: DVC runs it as first stage
+```
+
+### What happens after download?
+
+```
+external/loghub/HDFS/HDFS.log → copied to → data/raw/hdfs/HDFS.log (DVC-tracked)
+external/runbooks/content/     → copied to → data/raw/runbooks/     (DVC-tracked)
+```
+
+`external/` is gitignored (temporary). `data/raw/` is DVC-tracked (versioned).
 
 ### Interview Q&A for Data Pipeline
 
@@ -689,6 +783,41 @@ Makes all vectors length 1.0. After normalization:
 - So normalized vectors + IP = cosine similarity search
 
 This is a standard trick in information retrieval.
+
+### Key Code — Line by Line (`encoder.py`)
+
+```python
+from sentence_transformers import SentenceTransformer
+from diskcache import Cache
+import hashlib
+
+_cache = Cache("artifacts/embed_cache")           # Disk cache folder
+_model = None                                     # Lazy-loaded (not loaded until needed)
+
+def _get_model():                                 # Loads model only on first call
+    global _model
+    if _model is None:
+        _model = SentenceTransformer("all-MiniLM-L6-v2")  # Downloads 80MB on first run
+    return _model
+
+def encode(texts: list[str]) -> np.ndarray:
+    key = hashlib.sha256(str(texts).encode()).hexdigest()  # Hash of input text
+    if key in _cache:                              # Already computed before?
+        return _cache[key]                         # Return cached result instantly
+    vecs = _get_model().encode(
+        texts,
+        normalize_embeddings=True,                 # Makes dot product = cosine similarity
+        show_progress_bar=False,
+    )
+    _cache[key] = vecs                             # Save for next time
+    return vecs
+```
+
+### When is this called?
+
+1. **Index build time**: `build_index.py` calls `encode(chunk_texts)` for all runbook chunks
+2. **Query time**: `retriever.py` calls `encode([query])` to convert query → vector
+3. **Both times** the same model and cache are used → consistent embeddings
 
 ### Interview Q&A for Embeddings
 
@@ -795,6 +924,43 @@ The algorithm behind early Google search. Scores documents by keyword matching:
 | **FAISS only** | "storage capacity low" for query "disk full" | Exact term "NodeFilesystemSpaceFillingUp" |
 | **BM25 only** | Exact match "NodeFilesystemSpaceFillingUp" | "storage capacity low" (different words, same meaning) |
 | **Hybrid** | **Both!** Best of both worlds | Very little |
+
+### Key Code — Line by Line (`retriever.py`)
+
+```python
+class HybridRetriever:
+    def __init__(self, store, docstore, alpha=0.6):  # alpha = vector weight
+        self.store = store                            # FAISS index
+        self.docstore = docstore                      # Text + metadata
+        self.bm25 = BM25Index(docstore)               # Keyword search
+        self.alpha = alpha                            # 0.6 = 60% vector, 40% keyword
+
+    def retrieve(self, query: str, top_k: int = 6):
+        # Step 1: Vector search (semantic)
+        q_vec = encode([query])                       # Query → 384-dim vector
+        vec_results = self.store.search(q_vec, top_k)  # FAISS finds nearest neighbors
+
+        # Step 2: Keyword search
+        bm25_results = self.bm25.search(query, top_k)  # BM25 scores by keywords
+
+        # Step 3: Fuse scores
+        combined = {}                                  # doc_id → blended score
+        for doc_id, score in vec_results:
+            combined[doc_id] = self.alpha * normalize(score)      # 60% weight
+        for doc_id, score in bm25_results:
+            combined[doc_id] = combined.get(doc_id, 0) + \
+                               (1 - self.alpha) * normalize(score)  # 40% weight
+
+        # Step 4: Sort by combined score, return top_k
+        ranked = sorted(combined.items(), key=lambda x: x[1], reverse=True)
+        return [{"doc_id": d, "score": s, **self.docstore.get(d)} for d, s in ranked[:top_k]]
+```
+
+### When is this called?
+
+1. **Agent pipeline**: `retrieve_node` in `graph.py` calls `retriever.retrieve(query)` during incident analysis
+2. **RAG endpoint**: `POST /rag/search` calls it directly for standalone searches
+3. **Evaluation**: `run_eval.py` calls it for each gold query to measure MRR/Recall
 
 ---
 
@@ -1100,6 +1266,51 @@ Clamped to [0, 1]: score = max(0, min(1, 0.5 - raw))
 
 Now engineers see intuitive numbers: 0.0 = fine, 1.0 = red alert.
 
+### Key Code — Line by Line (`features.py` online)
+
+```python
+class OnlineFeaturizer:
+    def __init__(self, vocab_path: str):
+        with open(vocab_path) as f:
+            self.vocab = json.load(f)               # Load SAME vocab as training
+        self.miner = LogMiner()                     # Fresh Drain3 instance
+
+    def featurize(self, log_lines: list[str]) -> np.ndarray:
+        templates = [self.miner.add_log(line)       # Parse each live log line
+                     for line in log_lines]          # Get template string for each
+        vec = np.zeros(len(self.vocab))              # Start with all zeros
+        for t in templates:
+            if t in self.vocab:                      # Template in our vocabulary?
+                vec[self.vocab[t]] += 1              # Increment count at that position
+        return vec                                   # Same shape as training vectors!
+```
+
+### Key Code — Line by Line (`infer.py`)
+
+```python
+def score_logs(log_lines: list[str]) -> dict:
+    featurizer = _get_featurizer()                  # Lazy-load (cached after first call)
+    model = _load_model()                           # Lazy-load IsolationForest
+
+    vec = featurizer.featurize(log_lines)            # Log lines → feature vector
+    raw = model.decision_function([vec])[0]          # IsolationForest score
+    #  +0.3 = very normal, -0.3 = very anomalous
+
+    score = max(0.0, min(1.0, 0.5 - raw))           # Normalize to 0-1
+    #  +0.3 → 0.2 (normal), -0.3 → 0.8 (anomalous)
+
+    return {
+        "score": round(score, 4),                   # 0.0 = fine, 1.0 = red alert
+        "top_templates": featurizer.get_top(5),     # Most common patterns
+        "details": {"raw_isolation_score": round(raw, 4)},
+    }
+```
+
+### When is this called?
+
+1. **Agent pipeline**: `anomaly_node` in `graph.py` calls `score_logs(log_lines)`
+2. **Direct API**: `POST /anomaly/score` endpoint calls `score_logs()` for standalone scoring
+
 ### Return format
 
 ```python
@@ -1171,6 +1382,57 @@ Sets up the database connection using SQLModel. Works with SQLite (local dev) or
 ```
 Engine = connection to the kitchen (database). Created once, shared by everyone.
 Session = one order ticket. Open it, do queries, close it.
+```
+
+### Key Code — Line by Line (`db.py`)
+
+```python
+import os
+from sqlmodel import SQLModel, Session, create_engine
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "sqlite:///opspilot.db"                # Default: SQLite file in project root
+)                                           # Docker sets this to postgres://...
+
+engine = create_engine(DATABASE_URL)        # Create database connection pool
+
+def init_db():
+    SQLModel.metadata.create_all(engine)    # CREATE TABLE IF NOT EXISTS for all models
+
+def get_session():
+    """Yield a database session for FastAPI dependency injection."""
+    with Session(engine) as session:        # Open session
+        yield session                       # Route handler uses it
+                                            # Session auto-closes after response
+
+init_db()                                   # Tables created on import
+```
+
+### Key Code — Line by Line (`feedback.py`)
+
+```python
+@router.post("/")                           # POST /feedback
+def submit_feedback(
+    req: FeedbackRequest,                   # Pydantic validates input
+    session: Session = Depends(get_session)  # FastAPI injects DB session
+):
+    row = FeedbackRow(                      # Create database record
+        incident_id=req.incident_id,
+        helpful=req.helpful,
+        tags=req.tags,
+        comment=req.comment,
+    )
+    session.add(row)                        # Stage for insert
+    session.commit()                        # Write to database
+    session.refresh(row)                    # Get auto-generated ID
+    return {"id": row.id, "status": "saved"}
+```
+
+### When is this called?
+
+1. **Streamlit UI**: After analyzing an incident, engineer clicks "👍 Helpful" → sends POST /feedback
+2. **Admin dashboard**: `GET /admin/feedback-stats` queries the FeedbackRow table for aggregates
 
 engine = create_engine(DATABASE_URL)  # Connect to kitchen (once at startup)
 
@@ -2098,12 +2360,106 @@ Only triggers when Docker-related files change. Editing `docs/` or `README.md` w
 > **Q: How would you add code coverage?**
 > A: "Add `pytest --cov=opspilot --cov-report=xml` and upload to Codecov. Set a coverage threshold (e.g., 70%) as a CI gate. We'd focus coverage on safety.py and graph.py — the most critical modules."
 
-## Phase 13: Documentation (Steps 46-50)
-- **Step 46**: `README.md` — Flagship repo README with architecture diagram, quickstart, demo GIF.
-- **Step 47**: `docs/` — system_design.md (architecture decisions), data_licenses.md (Loghub, Apache-2.0).
-- **Step 48**: `examples/` — Example API payloads (curl commands) for every endpoint.
-- **Step 49**: `scripts/bootstrap.sh` — One-command setup: install deps + download data + build index + train model.
-- **Step 50**: `.pre-commit-config.yaml` — Auto-format and lint on every git commit.
+# PHASE 13: Documentation + Polish
+
+---
+
+## Step 46: `README.md`
+
+### What
+
+The flagship GitHub README — first thing anyone sees. Architecture diagram, features, tech stack, quickstart, API table.
+
+### Key sections
+
+| Section | Why |
+|---------|-----|
+| Badges | CI status, Python version — signals professionalism |
+| Architecture diagram | Visual understanding in 10 seconds |
+| Key Features | 9 bullet points with emojis |
+| Tech Stack table | 14 technologies organized by layer |
+| Quick Start | 6 commands to go from clone → running |
+| API Endpoints | All 8 routes in one table |
+| Project Structure | Shortened tree showing all packages |
+
+---
+
+## Step 47: `docs/system_design.md`
+
+### What
+
+5 Architecture Decision Records (ADRs) explaining **why** each technology was chosen.
+
+### ADRs covered
+
+| ADR | Decision | Key rationale |
+|-----|----------|---------------|
+| ADR-1 | LangGraph over LangChain | Deterministic 5-node pipeline vs free-form agent |
+| ADR-2 | Hybrid RAG (FAISS+BM25) | Catches both semantic and keyword matches |
+| ADR-3 | IsolationForest | Unsupervised, lightweight, no GPU needed |
+| ADR-4 | Mock LLM default | Demo-able without GPU, CI-testable |
+| ADR-5 | Safety validation | Filters hallucinated actions without evidence |
+
+### Interview Q&A for ADRs
+
+> **Q: What's an ADR?**
+> A: "An Architecture Decision Record documents a significant technical choice — the context, the decision, and the rationale. ADRs help future developers understand WHY something was built a certain way, not just how."
+
+---
+
+## Step 48: `examples/curl_examples.sh`
+
+### What
+
+Working curl commands for every API endpoint. Run them to demo the API.
+
+### Endpoints covered
+
+`/health`, `/incident/analyze`, `/rag/search`, `/anomaly/score`, `/feedback`, `/admin/health`, `/admin/clear-cache`, `/admin/feedback-stats`
+
+---
+
+## Step 49: `scripts/bootstrap.sh`
+
+### What
+
+One-command setup: `bash scripts/bootstrap.sh` installs deps, downloads data, trains model, builds index.
+
+### Why `set -e`?
+
+```bash
+set -e  # Exit immediately if ANY command fails
+```
+
+Without it, if Step 3 fails, Steps 4-6 still run with missing data → confusing errors. With `set -e`, it stops at the first failure with a clear error.
+
+---
+
+## Step 50: `.pre-commit-config.yaml`
+
+### What
+
+Auto-lint and format on every `git commit`. Prevents bad code from entering the repo.
+
+### How to set up
+
+```bash
+pip install pre-commit
+pre-commit install          # Hooks into .git/hooks/pre-commit
+git commit -m "test"        # Now ruff runs automatically before commit
+```
+
+### Hooks explained
+
+| Hook | What it does |
+|------|--------------|
+| `ruff --fix` | Auto-fix lint issues (unused imports, etc.) |
+| `ruff-format` | Auto-format code (consistent style) |
+| `trailing-whitespace` | Remove trailing spaces |
+| `end-of-file-fixer` | Ensure newline at end of file |
+| `check-yaml` | Validate YAML syntax |
+| `check-json` | Validate JSON syntax |
+| `check-added-large-files` | Block files >500KB (prevents accidental data commits) |
 
 ## Phase 14: Verification & Ship (Steps 51-57)
 - **Step 51**: Install deps and verify all imports work.
