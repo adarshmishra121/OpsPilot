@@ -2924,13 +2924,19 @@ Action 3: "Scale up pods to 10 replicas"
 After validation: only Action 1 survives
 ```
 
-### Why this is critical for safety
+### Interview Q&A for "0% Hallucinations"
 
-In production, an on-call engineer trusts the system's recommendations at 3 AM. If the system says "delete /var" with no evidence, it could cause catastrophic damage. Groundedness validation ensures every action traces back to a real document.
-
-### Interview answer
-
-> *"We implement groundedness enforcement at the code level. The safety module checks every recommended action against the set of actually-retrieved document IDs. Actions citing unknown or no documents are logged as warnings and filtered out before reaching the user."*
+> **Q: You claim you reduced ungrounded recommendations to 0%. LLMs hallucinate all the time. How is 0% possible?**
+>
+> A: "You're absolutely right, the LLM still hallucinates internally. I didn't solve the fundamental hallucination problem of neural networks. Instead, I solved it at the **systems engineering level using a Groundedness Filter.**
+>
+> Here is how the pipeline works:
+> 1. **Forced Citation:** I use structured JSON outputs via Pydantic. My schema forces the LLM to provide a list of `evidence_doc_ids` for **every single action** it suggests. The prompt strictly requires citing the exact runbook doc_id.
+> 2. **The Interceptor:** Before the API returns the response to the user, the LangGraph pipeline passes the LLM's output into a pure Python `validate_node`.
+> 3. **The Programmatic Check:** That Python function does a simple set intersection. It looks at the `evidence_doc_ids` the LLM cited, and checks if they exist in the actual list of `doc_ids` that FAISS retrieved a few milliseconds earlier.
+> 4. **The 0% Guarantee:** If the LLM hallucinates an action and cites a fake document, or fails to cite a document, the Python code **silently deletes that action** from the final response array. 
+> 
+> The system guarantees 0% *ungrounded recommendations* because a recommendation mathematically cannot pass through the API unless its `doc_id` exists in the retrieved context pool. I'd rather show the SRE zero actions than show them a hallucinated command that could take down production."
 
 ---
 
