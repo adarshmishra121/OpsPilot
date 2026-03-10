@@ -1,5 +1,6 @@
 """Train IsolationForest on log feature vectors and log results to MLflow."""
 
+import json
 import os
 import time
 
@@ -42,14 +43,16 @@ def main() -> None:
         train_time = time.time() - t0
 
         scores = model.decision_function(X)
-        mlflow.log_metrics(
-            {
-                "train_time_s": round(train_time, 2),
-                "mean_score": float(np.mean(scores)),
-                "std_score": float(np.std(scores)),
-                "anomaly_pct": float((model.predict(X) == -1).mean()),
-            }
-        )
+        metrics = {
+            "train_time_s": round(train_time, 2),
+            "mean_score": float(np.mean(scores)),
+            "std_score": float(np.std(scores)),
+            "anomaly_pct": float((model.predict(X) == -1).mean()),
+        }
+        mlflow.log_metrics(metrics)
+
+        with open("artifacts/train_metrics.json", "w") as f:
+            json.dump(metrics, f, indent=2)
 
         os.makedirs(os.path.dirname(MODEL_OUT), exist_ok=True)
         joblib.dump(model, MODEL_OUT)

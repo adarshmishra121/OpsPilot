@@ -1,0 +1,128 @@
+schema: '2.0'
+stages:
+  download:
+    cmd: python scripts/data/download_all.py
+    outs:
+    - path: data/raw/hdfs/HDFS.log
+      hash: md5
+      md5: b047f441fa3506b318f9410fa4b189db
+      size: 287848
+    - path: data/raw/runbooks
+      hash: md5
+      md5: 818261908fba287333f47655c6173d5e.dir
+      size: 110797
+      nfiles: 109
+  parse:
+    cmd: python scripts/features/parse_logs.py
+    deps:
+    - path: data/raw/hdfs/HDFS.log
+      hash: md5
+      md5: b047f441fa3506b318f9410fa4b189db
+      size: 287848
+    - path: scripts/features/parse_logs.py
+      hash: md5
+      md5: 30e9d080ef9352849216a9e7fdf894c5
+      size: 1369
+    params:
+      params.yaml:
+        anomaly.max_lines: 500000
+    outs:
+    - path: data/processed/parsed_logs.parquet
+      hash: md5
+      md5: 1ec418cccb518cf6104009c0365ba5a0
+      size: 105939
+  features:
+    cmd: python scripts/features/build_features.py
+    deps:
+    - path: data/processed/parsed_logs.parquet
+      hash: md5
+      md5: 1ec418cccb518cf6104009c0365ba5a0
+      size: 105939
+    - path: scripts/features/build_features.py
+      hash: md5
+      md5: 6aae665a611bfa6e9321df8af0f629e8
+      size: 1638
+    params:
+      params.yaml:
+        anomaly.vocab_size: 300
+        anomaly.window_size: 500
+    outs:
+    - path: artifacts/anomaly_vocab.json
+      hash: md5
+      md5: 45f7b8e91f82d433a1c2ec90e48871f0
+      size: 51
+    - path: data/features/features.parquet
+      hash: md5
+      md5: fcd0b924d56abe20ef8369fff59bcad9
+      size: 2101
+  train:
+    cmd: python scripts/train/train_anomaly.py
+    deps:
+    - path: data/features/features.parquet
+      hash: md5
+      md5: fcd0b924d56abe20ef8369fff59bcad9
+      size: 2101
+    - path: scripts/train/train_anomaly.py
+      hash: md5
+      md5: 5df1d733aaec6e0e6e35667308de6e9b
+      size: 1997
+    params:
+      params.yaml:
+        anomaly.contamination: 0.01
+        anomaly.n_estimators: 150
+    outs:
+    - path: artifacts/train_metrics.json
+      hash: md5
+      md5: d5579fe010725aa8d8cd4c5c00e0d98c
+      size: 123
+    - path: models/anomaly_model.pkl
+      hash: md5
+      md5: bc285ab5efcae9e56eb84662b95c4315
+      size: 169641
+  index:
+    cmd: python scripts/rag/build_index.py
+    deps:
+    - path: data/raw/runbooks
+      hash: md5
+      md5: 818261908fba287333f47655c6173d5e.dir
+      size: 110797
+      nfiles: 109
+    - path: scripts/rag/build_index.py
+      hash: md5
+      md5: aee6cf4d996cbfc3be78bf2b666fc6e7
+      size: 1758
+    params:
+      params.yaml:
+        rag.chunk_overlap: 64
+        rag.chunk_size: 512
+        rag.embedding_model: all-MiniLM-L6-v2
+    outs:
+    - path: artifacts/vector_index
+      hash: md5
+      md5: 4c45ecd11556aeba089d944a449a655b.dir
+      size: 306132
+      nfiles: 2
+  eval:
+    cmd: python scripts/eval/run_eval.py
+    deps:
+    - path: artifacts/vector_index
+      hash: md5
+      md5: 4c45ecd11556aeba089d944a449a655b.dir
+      size: 306132
+      nfiles: 2
+    - path: data/eval/rag_gold.jsonl
+      hash: md5
+      md5: 4c77a1351fc8bafcb12fa6638d79ba81
+      size: 1659
+    - path: scripts/eval/run_eval.py
+      hash: md5
+      md5: 5fcca2b8b775be04769fb056911573d0
+      size: 2402
+    params:
+      params.yaml:
+        eval.top_k: 6
+    outs:
+    - path: artifacts/eval_metrics.json
+      hash: md5
+      md5: ff3fc0705af4e64b85a77179b4b7c9b3
+      size: 73

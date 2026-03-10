@@ -5,36 +5,36 @@ stages:
   download:
     cmd: python scripts/data/download_all.py
     outs:
-      - data/raw/HDFS.log
+      - data/raw/hdfs/HDFS.log
       - data/raw/runbooks
 
   parse:
     cmd: python scripts/features/parse_logs.py
     deps:
       - scripts/features/parse_logs.py
-      - data/raw/HDFS.log
+      - data/raw/hdfs/HDFS.log
     params:
       - anomaly.max_lines
     outs:
-      - artifacts/templates.parquet
+      - data/processed/parsed_logs.parquet
 
   features:
     cmd: python scripts/features/build_features.py
     deps:
       - scripts/features/build_features.py
-      - artifacts/templates.parquet
+      - data/processed/parsed_logs.parquet
     params:
       - anomaly.window_size
       - anomaly.vocab_size
     outs:
-      - artifacts/features.parquet
+      - data/features/features.parquet
       - artifacts/anomaly_vocab.json
 
   train:
     cmd: python scripts/train/train_anomaly.py
     deps:
       - scripts/train/train_anomaly.py
-      - artifacts/features.parquet
+      - data/features/features.parquet
     params:
       - anomaly.n_estimators
       - anomaly.contamination
