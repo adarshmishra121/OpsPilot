@@ -5200,3 +5200,1584 @@ print(token)
 ---
 
 > **💡 Pro tip:** Bookmark this section. When something breaks, Ctrl+F for the error message — chances are it's one of these 20 issues.
+
+---
+
+# 📚 COMPLETE INTERVIEW PREP — Every Tool, Library & Framework In Detail
+
+> This section is your **one-stop interview encyclopedia**. For every technology in OpsPilot, you'll find: what it is, how it works internally, core concepts, detailed interview Q&A, OpsPilot-specific usage, and comparisons. Study this section and you can answer ANY question about your tech stack.
+
+---
+
+# CATEGORY 1: WEB FRAMEWORK & API LAYER
+
+---
+
+## 🔷 FastAPI
+
+### What It Is
+FastAPI is a modern, high-performance Python web framework for building APIs. Built on top of **Starlette** (ASGI framework) and **Pydantic** (data validation). Created by Sebastián Ramírez in 2018.
+
+### Core Concepts
+
+**1. ASGI vs WSGI**
+```
+WSGI (Flask, Django):
+  Request → [Worker 1] → Process → Response
+  Request → [Worker 2] → Process → Response
+  Each worker handles ONE request at a time
+
+ASGI (FastAPI, uvicorn):
+  Request ─┐
+  Request ─┤→ [Event Loop] → handles ALL concurrently
+  Request ─┘
+  One worker handles MANY requests via async/await
+```
+
+**Why ASGI matters for OpsPilot:** Our API calls Ollama (2-8s), database queries, and embedding computation. With WSGI, each worker blocks during the LLM call. With ASGI, while one request waits for the LLM, other requests are processed.
+
+**2. Path Operations (Decorators)**
+```python
+@app.get("/health")          # GET method + path
+@app.post("/incident/analyze")  # POST method + path
+```
+These decorators register a function as an HTTP endpoint. FastAPI inspects the function signature to auto-generate docs and validation.
+
+**3. Dependency Injection**
+```python
+def get_session():
+    with Session(engine) as session:
+        yield session
+
+@router.post("/feedback")
+def submit(req: FeedbackRequest, session: Session = Depends(get_session)):
+    # FastAPI calls get_session(), passes result as 'session'
+    # After the function returns, get_session() cleanup runs
+```
+Dependencies can depend on other dependencies (chain). In tests, you can override them:
+```python
+app.dependency_overrides[get_session] = lambda: test_session
+```
+
+**4. App Factory Pattern**
+```python
+def create_app() -> FastAPI:
+    app = FastAPI(title="OpsPilot API")
+    app.include_router(health_router)
+    app.include_router(incident_router, prefix="/incident")
+    instrument_app(app)
+    return app
+
+app = create_app()  # Module-level for uvicorn
+```
+Why: Tests call `create_app()` to get a fresh instance. No global state pollution.
+
+**5. Auto-Generated Documentation**
+FastAPI reads:
+- Function name → endpoint description
+- Type hints → parameter types
+- Pydantic models → request/response schemas
+- Docstrings → detailed descriptions
+
+Result: Full interactive Swagger UI at `/docs` and ReDoc at `/redoc` — zero manual work.
+
+### How OpsPilot Uses It
+- `src/opspilot/api/main.py` — app factory with 6 routers
+- 8 endpoints across 6 router files
+- Pydantic schemas for all request/response validation
+- `Depends()` for DB sessions and auth
+- `Instrumentator` adds `/metrics` for Prometheus
+
+### Interview Deep Dive
+
+> **Q: Explain the request lifecycle in FastAPI.**
+> A: "Request arrives at uvicorn → ASGI middleware chain (CORS, auth, metrics) → FastAPI routing matches URL + method to a handler → Pydantic deserializes and validates the request body → dependency injection resolves `Depends()` parameters → handler function executes → Pydantic serializes the response → middleware chain (logging, metrics) → HTTP response sent back."
+
+> **Q: What's the difference between `@app.get` and `@router.get`?**
+> A: "`@app.get` registers directly on the FastAPI instance. `@router.get` registers on an `APIRouter` — a lightweight grouping mechanism. Routers are included via `app.include_router(router, prefix='/incident')`, which adds URL prefixes and tags. This separates concerns — each file handles one domain."
+
+> **Q: How does FastAPI handle async?**
+> A: "If you define `async def endpoint()`, FastAPI runs it on the event loop directly — it can `await` I/O operations without blocking. If you define `def endpoint()` (sync), FastAPI runs it in a thread pool to avoid blocking the event loop. For CPU-bound work, use sync functions. For I/O-bound work (DB queries, HTTP calls), use async."
+
+> **Q: How would you add rate limiting to FastAPI?**
+> A: "Use the `slowapi` library — it wraps `limits` with FastAPI integration. Create a `Limiter`, apply it as middleware, then decorate endpoints: `@limiter.limit('10/minute')`. For more control, use Redis-backed rate limiting with a custom middleware that tracks request counts per IP or API key."
+
+> **Q: How does FastAPI compare to Flask?**
+> A: "Three key differences: (1) FastAPI is ASGI (async-native), Flask is WSGI (needs extensions for async). (2) FastAPI auto-validates with Pydantic and generates OpenAPI docs; Flask needs manual validation and separate tools like flask-restx. (3) FastAPI's dependency injection system is more powerful than Flask's `g` object. Flask wins on simplicity and ecosystem size. For APIs, FastAPI is better; for full web apps with templates, Flask or Django."
+
+---
+
+## 🔷 Pydantic (v2)
+
+### What It Is
+A data validation library that uses Python type hints to define data schemas. Pydantic v2 was rewritten with a Rust core (`pydantic-core`) for 5-50x speed improvement.
+
+### Core Concepts
+
+**1. BaseModel — The Foundation**
+```python
+class IncidentRequest(BaseModel):
+    incident_id: str                          # Required string
+    alert_title: str                          # Required string
+    service: Optional[str] = None             # Optional, defaults to None
+    log_lines: List[str] = Field(default_factory=list)  # Defaults to []
+```
+
+**2. Validation Behavior**
+```python
+# Auto-coercion:
+req = IncidentRequest(incident_id=123, alert_title="disk full")
+# 123 (int) → "123" (str) — Pydantic coerces automatically
+
+# Validation failure:
+req = IncidentRequest()  # Missing required fields
+# Raises ValidationError with clear message:
+# "incident_id: field required"
+```
+
+**3. Serialization**
+```python
+req.model_dump()       # → Python dict
+req.model_dump_json()  # → JSON string
+```
+
+**4. Field Constraints**
+```python
+class Config(BaseModel):
+    alpha: float = Field(ge=0.0, le=1.0)  # 0.0 ≤ alpha ≤ 1.0
+    top_k: int = Field(gt=0, le=100)      # 1 ≤ top_k ≤ 100
+```
+
+### How OpsPilot Uses It
+- `schemas.py` — all 8 request/response models
+- FastAPI auto-converts these to OpenAPI schema
+- `model_dump()` converts to dicts for LangGraph state
+- `Field(default_factory=list)` avoids mutable default bugs
+
+### Interview Deep Dive
+
+> **Q: Why `Field(default_factory=list)` and not `default=[]`?**
+> A: "In Python, default arguments are evaluated ONCE at class definition time. `default=[]` means all instances share the same list object. Appending to one instance's list mutates all instances. `default_factory=list` calls `list()` each time, creating a fresh empty list per instance. This is a classic Python gotcha that Pydantic handles explicitly."
+
+> **Q: What changed from Pydantic v1 to v2?**
+> A: "Three big changes: (1) Core rewritten in Rust — 5-50x faster validation. (2) `.dict()` renamed to `.model_dump()`, `.json()` to `.model_dump_json()`. (3) `Config` class replaced with `model_config` dict. (4) Stricter validation by default — v1 was lenient, v2 rejects ambiguous inputs."
+
+> **Q: Pydantic vs dataclasses vs TypedDict?**
+> A: "Dataclasses are Python's built-in — fast but no validation. TypedDict is a type hint only — no runtime checking. Pydantic adds runtime validation, coercion, serialization, and JSON schema generation. For API boundaries (untrusted input), always Pydantic. For internal data structures, dataclasses. For LangGraph state, TypedDict (we use all three in OpsPilot)."
+
+---
+
+## 🔷 Uvicorn
+
+### What It Is
+An ASGI server that actually **runs** your FastAPI app. FastAPI defines the routes; uvicorn listens on a port and forwards HTTP requests to the app.
+
+### Core Concepts
+```
+Browser request (HTTP)
+    │
+    ▼
+uvicorn (port 8000) — the server
+    │ converts HTTP → ASGI protocol
+    ▼
+FastAPI app — the framework
+    │ routes to handler
+    ▼
+Your function — the business logic
+```
+
+**Key command:**
+```bash
+uvicorn opspilot.api.main:app --reload --port 8000
+#       ^^^^^^^^^^^^^^^^ ^^^
+#       module path       variable name
+```
+
+- `--reload` — auto-restart when code changes (dev only)
+- `--workers 4` — spawn 4 processes (production)
+- `--host 0.0.0.0` — listen on all interfaces (Docker)
+
+### Interview Deep Dive
+
+> **Q: uvicorn vs gunicorn?**
+> A: "uvicorn is an ASGI server (async). gunicorn is a WSGI server (sync). For FastAPI, use uvicorn. In production, you can use gunicorn as a process manager WITH uvicorn workers: `gunicorn -k uvicorn.workers.UvicornWorker -w 4 opspilot.api.main:app`. Gunicorn handles worker management (restarts, health) while uvicorn handles async request processing."
+
+---
+
+## 🔷 httpx
+
+### What It Is
+A modern Python HTTP client (replacement for `requests`). Supports both sync and async calls. Used in OpsPilot to call the Ollama LLM API and in the Streamlit UI to call our API.
+
+### Core Concepts
+```python
+# Sync (used in Streamlit):
+resp = httpx.post("http://localhost:8000/incident/analyze", json=payload, timeout=120.0)
+data = resp.json()
+
+# Async (could use in FastAPI):
+async with httpx.AsyncClient() as client:
+    resp = await client.post(url, json=payload)
+```
+
+### Interview Deep Dive
+
+> **Q: Why httpx over requests?**
+> A: "httpx supports async (`await client.post()`), which is critical in ASGI frameworks like FastAPI. `requests` is sync-only — using it inside an async endpoint blocks the event loop. httpx also has HTTP/2 support, connection pooling, and a nearly identical API to requests for easy migration."
+
+---
+
+## 🔷 SQLModel / SQLAlchemy
+
+### What It Is
+SQLModel combines SQLAlchemy (database ORM) and Pydantic (validation) into one. One class = one database table AND one API schema.
+
+### Core Concepts
+
+**1. Model Definition**
+```python
+class FeedbackRow(SQLModel, table=True):       # table=True → creates DB table
+    id: int | None = Field(primary_key=True)    # Auto-generated
+    incident_id: str = Field(index=True)         # Indexed for fast lookups
+    helpful: bool
+    tags: List[str] = Field(sa_column=Column(JSON))  # Store list as JSON
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+**2. Engine & Session**
+```python
+engine = create_engine("sqlite:///opspilot.db")  # Connection pool
+SQLModel.metadata.create_all(engine)              # CREATE TABLE IF NOT EXISTS
+
+with Session(engine) as session:
+    session.add(row)     # Stage insert
+    session.commit()     # Write to DB
+    session.refresh(row) # Reload auto-generated fields (like id)
+```
+
+**3. Dependency Injection with FastAPI**
+```python
+def get_session():
+    with Session(engine) as session:
+        yield session  # Give to handler → auto-close after
+
+@router.post("/feedback")
+def submit(req: FeedbackRequest, session: Session = Depends(get_session)):
+    ...
+```
+
+### Interview Deep Dive
+
+> **Q: SQLModel vs raw SQLAlchemy vs Django ORM?**
+> A: "SQLAlchemy is the most powerful Python ORM — full control over SQL. Django ORM is tightly coupled to Django (can't use standalone easily). SQLModel is built on top of SQLAlchemy but adds Pydantic integration — one class definition serves as both DB schema and API schema. For FastAPI projects, SQLModel eliminates duplicate model definitions."
+
+> **Q: What's the difference between Engine and Session?**
+> A: "Engine is the connection pool — created once at startup, shared by all requests. It manages the physical database connections. Session is a unit of work — opened per request, tracks changes (inserts, updates), and committed or rolled back as one transaction. Think: Engine = restaurant kitchen (permanent), Session = one customer's order ticket (temporary)."
+
+> **Q: Why `yield` in `get_session()` instead of `return`?**
+> A: "The `yield` turns `get_session()` into a generator. FastAPI's dependency injection calls `next()` to get the session, gives it to the handler, and when the handler finishes, resumes the generator — which exits the `with Session(engine)` block, closing the session. This is the context manager pattern — resource acquisition and cleanup in one function."
+
+---
+
+## 🔷 JWT (PyJWT)
+
+### What It Is
+JSON Web Tokens — a standard for stateless authentication. The server creates a signed token containing user identity and permissions; the client sends it with every request.
+
+### Core Concepts
+
+**1. Token Structure**
+```
+eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZGFyc2giLCJyb2xlIjoiYWRtaW4iLCJleHAiOjE3MDk5OTk5OTl9.signature
+│── Header ──────────│── Payload (Claims) ───────────────────────────────────────│── Signature ──│
+```
+- **Header**: Algorithm (HS256) + token type (JWT)
+- **Payload**: Claims — `sub` (subject/user), `role`, `exp` (expiry), etc.
+- **Signature**: HMAC(header + payload, secret) — proves the token wasn't tampered with
+
+**2. Flow**
+```
+Login: POST /auth/login {username, password}
+  → Server verifies credentials
+  → Server creates JWT: jwt.encode({"sub": "adarsh", "role": "admin", "exp": ...}, SECRET)
+  → Returns token to client
+
+Request: POST /incident/analyze + Header: Authorization: Bearer <token>
+  → Server: jwt.decode(token, SECRET) → {"sub": "adarsh", "role": "admin"}
+  → If valid + not expired → allow request
+  → If invalid → 401 Unauthorized
+```
+
+**3. RBAC (Role-Based Access Control)**
+```python
+def require_role(role: str):
+    def checker(user = Depends(get_current_user)):
+        if user["role"] != role:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return user
+    return checker
+
+# Usage:
+@router.get("/admin/health", dependencies=[Depends(require_role("admin"))])
+```
+
+### Interview Deep Dive
+
+> **Q: JWT vs session-based auth?**
+> A: "Sessions store state on the server (in memory or Redis) — the client gets a session ID cookie. JWT stores state in the token itself — the server is stateless. JWT advantages: works across multiple servers (no shared session store), good for APIs and mobile apps. Disadvantages: can't revoke individual tokens (they're self-contained), token size is larger than a session ID."
+
+> **Q: How do you handle JWT revocation?**
+> A: "Three approaches: (1) Short expiry times (15 min) + refresh tokens — most common. (2) Token blocklist in Redis — check every request against revoked tokens. (3) Rotate the `JWT_SECRET` — invalidates ALL tokens (nuclear option). In OpsPilot, we use short expiry for production."
+
+> **Q: What is HS256 vs RS256?**
+> A: "HS256 (HMAC-SHA256) uses a shared secret — same key to sign and verify. Simple but the secret must be kept on every server. RS256 (RSA-SHA256) uses asymmetric keys — private key signs, public key verifies. More secure for distributed systems because you only share the public key. For a single-service API like OpsPilot, HS256 is fine."
+
+---
+
+# CATEGORY 2: DATA & MACHINE LEARNING
+
+---
+
+## 🔷 IsolationForest (scikit-learn)
+
+### What It Is
+An unsupervised anomaly detection algorithm. It learns what "normal" data looks like by building random trees, then scores new data by how easy it is to isolate (separate from the rest).
+
+### Core Concepts
+
+**1. The Intuition**
+```
+Normal data points cluster together → need MANY splits to isolate one
+Anomalous data points are far from clusters → need FEW splits to isolate
+
+Short isolation path = anomaly
+Long isolation path = normal
+```
+
+**2. The Algorithm (Step by Step)**
+```
+Training (fit):
+  1. Create 100 random trees (n_estimators=100)
+  2. For each tree:
+     a. Random-sample 256 data points (max_samples=256)
+     b. Pick a random feature
+     c. Pick a random split value between [min, max] of that feature
+     d. Split data: left (< value), right (≥ value)
+     e. Recurse until each point is alone OR max depth reached
+
+Scoring (decision_function):
+  1. Drop the new point through all 100 trees
+  2. Record path length in each tree (number of splits to isolate)
+  3. Average path length across all trees
+  4. Score = 2^(-avg_path_length / c(n))
+     where c(n) = expected path length in a Binary Search Tree
+```
+
+**3. Key Hyperparameters**
+```python
+IsolationForest(
+    n_estimators=100,       # Number of trees (more = stable, slower)
+    max_samples=256,        # Subsample per tree (smaller = faster, more diverse)
+    contamination=0.01,     # Expected % of anomalies (sets threshold)
+    random_state=42,        # Reproducibility
+    n_jobs=-1,              # Use all CPU cores
+)
+```
+
+**4. Score Normalization (OpsPilot-specific)**
+```python
+raw = model.decision_function([vector])[0]
+# sklearn: positive = normal, negative = anomalous
+# Range: roughly +0.3 to -0.3
+
+normalized = max(0.0, min(1.0, 0.5 - raw))
+# +0.3 → 0.2 (normal, low score)
+# 0.0  → 0.5 (borderline)
+# -0.3 → 0.8 (anomalous, high score)
+```
+
+### Interview Deep Dive
+
+> **Q: Why IsolationForest over One-Class SVM?**
+> A: "Complexity: IsolationForest is O(n log n) training, O(log n) inference. One-Class SVM is O(n²) to O(n³) training. For our 500K samples, SVM would take hours. IsolationForest trains in seconds. Also, IsolationForest doesn't need feature scaling — it splits on raw values."
+
+> **Q: Why IsolationForest over an LSTM autoencoder?**
+> A: "LSTM autoencoders model temporal sequences — great for detecting slow-building anomalies ('error rate increasing over 30 minutes'). But they need GPU, hours of training, and 200MB+ model files. IsolationForest treats each window independently, trains in seconds, infers in <1ms, and produces a 2MB model. For v1, IsolationForest is the pragmatic choice. v2 could add temporal features (sliding window) without needing an LSTM."
+
+> **Q: What is the contamination parameter?**
+> A: "It sets the decision threshold. `contamination=0.01` means 'expect ~1% of training data to be anomalous.' Internally, sklearn sets the threshold so that ~1% of training samples score below it. Higher contamination = more sensitive (more alerts). Lower = more specific (fewer false alarms). For SRE alerting, we want low false alarms → 0.01 is conservative."
+
+> **Q: How does IsolationForest handle high-dimensional data?**
+> A: "Each tree randomly selects ONE feature per split — it doesn't look at all 300 features at once. With 100 trees, each sampling different features, the ensemble covers the full feature space. This is similar to how Random Forest handles high dimensions. The random feature selection also acts as implicit feature selection."
+
+> **Q: What are the limitations?**
+> A: "Three main ones: (1) No temporal awareness — each window is independent. (2) Assumes anomalies are rare AND different from normal — doesn't work if anomalies are clustered. (3) Feature engineering dependent — garbage features in = garbage scores out. Drain3 template counting is our feature engineering."
+
+---
+
+## 🔷 Drain3
+
+### What It Is
+A streaming log template mining library. It automatically discovers **templates** (patterns) from raw log lines, replacing variable parts with wildcards (`<*>`).
+
+### Core Concepts
+
+**1. Parse Tree Structure**
+```
+Level 0: [Root]
+Level 1: Group by token count → [5 tokens], [6 tokens], [7 tokens]
+Level 2: Group by 1st token → ["ERROR"], ["INFO"], ["WARN"]
+Level 3: Group by 2nd token → ["disk"], ["user"], ["port"]
+Level 4: Compare remaining tokens against existing templates
+         → similarity > sim_th (0.4) → merge into existing template
+         → similarity < sim_th → create NEW template
+```
+
+**2. Similarity Calculation**
+```
+Template:  "ERROR disk full on <*>"
+New log:   "ERROR disk full on /dev/sdb2"
+
+Matching tokens: ERROR, disk, full, on = 4
+Total tokens: 5
+Similarity: 4/5 = 0.8 > 0.4 → MERGE (replace /dev/sdb2 with <*>)
+```
+
+**3. Masking (Pre-processing)**
+```
+Before: "ERROR port 8080 connection to 192.168.1.42 failed"
+After:  "ERROR port NUM connection to IP failed"
+
+Masking prevents: "port 8080", "port 3000", "port 443" → 3 templates
+Instead:           "port NUM" → 1 template
+```
+
+**4. Key Configuration (`drain3.ini`)**
+```ini
+[DRAIN]
+sim_th = 0.4          # Merge threshold (lower = fewer templates, more aggressive)
+depth = 4             # Parse tree depth (4 is standard from the paper)
+max_clusters = 100000 # Max templates
+
+[MASKING]
+masking = [
+    {"regex_pattern": "\\d+", "mask_with": "NUM"},
+    {"regex_pattern": "0x[0-9a-fA-F]+", "mask_with": "HEX"}
+]
+```
+
+### Interview Deep Dive
+
+> **Q: Why Drain3 over regex for log parsing?**
+> A: "Regex requires knowing the log format upfront — you write one regex per log type. When a new service or new log format appears, you manually add a regex. Drain3 is unsupervised — it discovers patterns automatically from raw text. New log formats get new templates without any manual work. In production with 50+ services, maintaining regex is unsustainable."
+
+> **Q: What happens when sim_th is too low or too high?**
+> A: "Too low (0.1): Everything merges into a few templates. 'disk full' and 'disk erased' become the same template. You lose discriminative power. Too high (0.9): Every slight variation creates a new template. 'disk full on /dev/sda1' and 'disk full on /dev/sda2' are separate templates. Template explosion → sparse features. 0.4 is the empirically validated default from the Drain paper."
+
+> **Q: How does Drain3 handle streaming (online) log parsing?**
+> A: "Drain3 maintains the parse tree in memory. Each new log line traverses the tree and either matches an existing template or creates a new one. The state can be serialized (snapshot) for crash recovery. This makes it suitable for real-time systems — no need to batch process all logs at once."
+
+---
+
+## 🔷 scikit-learn
+
+### What It Is
+The most widely used Python ML library. Provides consistent APIs for classification, regression, clustering, dimensionality reduction, and preprocessing. Used in OpsPilot for `IsolationForest` and feature preprocessing.
+
+### Core Concepts
+
+**1. The Estimator API (fit/predict/transform)**
+```python
+# All sklearn models follow the same pattern:
+model = IsolationForest(n_estimators=100)  # Create
+model.fit(X_train)                         # Learn from data
+scores = model.decision_function(X_test)   # Score new data
+labels = model.predict(X_test)             # Classify: 1 (normal) or -1 (anomaly)
+```
+
+**2. Serialization with joblib**
+```python
+import joblib
+joblib.dump(model, "models/anomaly_model.pkl")  # Save trained model
+model = joblib.load("models/anomaly_model.pkl")  # Load for inference
+```
+
+### Interview Deep Dive
+
+> **Q: Why joblib over pickle for model serialization?**
+> A: "joblib is optimized for numpy arrays — the main data structure in sklearn models. It compresses large arrays efficiently and handles memory mapping for fast loading of large models. For a 2MB IsolationForest, the difference is small, but for large models with many trees, joblib can be 5-10x faster."
+
+> **Q: What's the difference between `predict()` and `decision_function()`?**
+> A: "`predict()` returns binary labels: 1 (normal) or -1 (anomaly). `decision_function()` returns continuous scores — higher means more normal. We use `decision_function()` because we need a continuous anomaly score (0-1), not a binary label. The continuous score lets engineers decide their own threshold."
+
+---
+
+## 🔷 pandas
+
+### What It Is
+The standard Python library for tabular data manipulation. DataFrames provide SQL-like operations (filter, group, join, aggregate) on structured data.
+
+### How OpsPilot Uses It
+```python
+# Read parsed logs:
+df = pd.read_parquet("data/processed/parsed_logs.parquet")
+
+# Build feature vectors:
+template_counts = df.groupby("window_id")["template"].value_counts()
+
+# Save features:
+features_df.to_parquet("artifacts/features.parquet", index=False)
+```
+
+### Interview Deep Dive
+
+> **Q: Why Parquet over CSV?**
+> A: "Three reasons: (1) 10x smaller files — columnar compression. (2) Type-preserving — CSV stores everything as strings, Parquet preserves int/float/datetime. (3) Column-level reads — can load just the columns you need without reading the whole file. For our 500K-row log dataset, Parquet is dramatically faster and smaller."
+
+---
+
+## 🔷 NumPy
+
+### What It Is
+The foundation of scientific computing in Python. Provides N-dimensional arrays (ndarrays) and vectorized operations that are 100x faster than Python lists.
+
+### How OpsPilot Uses It
+```python
+# Feature vectors are numpy arrays:
+vec = np.zeros(len(vocab))       # Create zero vector
+vec[vocab["disk_full"]] += 1     # Increment template count
+
+# FAISS expects numpy arrays:
+faiss_index.add(vectors)          # vectors is np.ndarray shape (N, 384)
+
+# Score normalization:
+score = np.clip(0.5 - raw_score, 0.0, 1.0)  # Clamp to [0, 1]
+```
+
+### Interview Deep Dive
+
+> **Q: Why is NumPy faster than Python lists?**
+> A: "Three reasons: (1) Contiguous memory — elements are stored next to each other (cache-friendly). (2) Fixed type — no per-element type checking. (3) Vectorized operations — `np.dot(a, b)` runs in C, not Python. A dot product of two 384-dim vectors: Python loop = 384 function calls. NumPy = one C function call."
+
+---
+
+# CATEGORY 3: RAG & SEARCH
+
+---
+
+## 🔷 Sentence-Transformers (all-MiniLM-L6-v2)
+
+### What It Is
+A library for computing dense vector representations (embeddings) of text. `all-MiniLM-L6-v2` is a specific model — 80MB, 384 dimensions, trained on 1 billion sentence pairs.
+
+### Core Concepts
+
+**1. What Are Embeddings?**
+```
+Text                           → Vector (384 numbers)
+"disk is running full"         → [0.12, -0.34, 0.87, ...]
+"storage capacity exhausted"   → [0.11, -0.33, 0.85, ...]  ← similar meaning!
+"user logged in successfully"  → [0.78, 0.22, -0.45, ...]  ← different meaning!
+```
+Similar texts → similar vectors → high cosine similarity.
+
+**2. How the Model Works Internally**
+```
+Input text: "disk is running full"
+    ↓ Tokenize: ["disk", "is", "running", "full"]
+    ↓ Transformer encoder (6 layers of self-attention)
+    ↓ Mean pooling (average all token vectors)
+    ↓ Normalize to unit length
+Output: [0.12, -0.34, 0.87, ...] (384 dimensions, ||v|| = 1.0)
+```
+
+**3. Why Normalize?**
+```python
+vecs = model.encode(texts, normalize_embeddings=True)
+# All vectors have length 1.0
+# Now: dot product = cosine similarity (no extra division needed)
+# FAISS IndexFlatIP uses dot product → we get cosine similarity for free
+```
+
+### How OpsPilot Uses It
+- `encoder.py` — encodes runbook chunks and queries
+- `diskcache` — caches embeddings with SHA-256 keys
+- Used at both index build time and query time
+- Lazy-loaded (not imported until first use)
+
+### Interview Deep Dive
+
+> **Q: Why all-MiniLM-L6-v2 over OpenAI embeddings?**
+> A: "Three reasons: (1) Free — no API costs. (2) Local — SRE logs contain hostnames, IPs, and internal service names. Sending that to OpenAI violates data privacy in regulated industries. (3) 80MB on CPU — no GPU needed. OpenAI's `text-embedding-3-large` is better quality (64.6 vs 58.8 MTEB), but for our ~1000-chunk corpus, the quality difference doesn't matter."
+
+> **Q: What is MTEB and why does the score matter?**
+> A: "Massive Text Embedding Benchmark — tests models on 56 datasets across 8 tasks (classification, clustering, retrieval, etc.). all-MiniLM-L6-v2 scores 58.8. Higher score = better semantic understanding. For our small corpus of SRE runbooks, 58.8 is more than sufficient. I'd upgrade to a larger model (e5-large, 62.0) only if retrieval quality becomes a bottleneck."
+
+> **Q: What is mean pooling?**
+> A: "A transformer outputs one vector per token. For a 5-word sentence, you get 5 vectors. Mean pooling averages all 5 into one vector. This gives a single fixed-size representation regardless of input length. Alternative: CLS pooling (use only the first token's vector) — faster but lower quality for sentence similarity."
+
+---
+
+## 🔷 FAISS (Facebook AI Similarity Search)
+
+### What It Is
+A library for efficient similarity search over dense vectors. Created by Facebook AI Research. Used for the vector search component of hybrid RAG.
+
+### Core Concepts
+
+**1. Index Types**
+```
+IndexFlatIP (we use):  Brute-force inner product
+  Pros: Exact results, simple, <1ms for 1000 vectors
+  Cons: O(N) per query — slow for millions
+
+IndexIVFFlat:  Inverted file with clustering
+  Pros: O(√N) per query — fast for millions
+  Cons: Approximate results (~95-99% accuracy)
+  When: Corpus > 10K chunks
+
+IndexHNSW:  Hierarchical Navigable Small World
+  Pros: O(log N) per query, excellent accuracy
+  Cons: Higher memory usage
+  When: Need both speed and accuracy on large corpora
+```
+
+**2. How IndexFlatIP Works**
+```python
+import faiss, numpy as np
+
+# Build:
+dim = 384
+index = faiss.IndexFlatIP(dim)          # Inner Product index
+index.add(np.array(all_vectors))         # Add N vectors
+
+# Search:
+scores, indices = index.search(query_vec, k=6)
+# For each stored vector: compute dot product with query
+# Return top 6 by score
+```
+
+**3. Persistence**
+```python
+faiss.write_index(index, "artifacts/vector_index/index.faiss")  # Save
+index = faiss.read_index("artifacts/vector_index/index.faiss")  # Load
+```
+
+### Interview Deep Dive
+
+> **Q: Why FAISS over Pinecone/Weaviate/Milvus?**
+> A: "For <10K documents, FAISS is simpler and faster. It runs in-process (no network calls), has zero infrastructure cost, and exact brute-force search takes <1ms. Pinecone adds network latency (~10ms), costs money, and is overkill for our corpus. I'd switch to a managed vector DB when the corpus exceeds 100K chunks or when I need filtering/metadata query capabilities."
+
+> **Q: What's the difference between IndexFlatIP and IndexFlatL2?**
+> A: "IP = Inner Product (dot product). L2 = Euclidean distance. With normalized vectors (unit length), Inner Product equals cosine similarity. We normalize our embeddings, so IP gives us cosine similarity. L2 would also work (for normalized vectors, L2 distance = 2 - 2×cosine_sim), but IP is more intuitive and slightly faster."
+
+> **Q: How would you scale FAISS to 10 million documents?**
+> A: "Switch to `IndexIVFFlat` or `IndexHNSW`. IVF: train on a sample, create ~1000 clusters, at query time only search the closest ~10 clusters → 100x faster. HNSW: build a navigable small world graph → O(log N) queries. Both sacrifice exact accuracy (~95-99%) for massive speed gains. For 10M+ docs, use FAISS on GPU or a managed service like Pinecone."
+
+---
+
+## 🔷 BM25 (rank-bm25)
+
+### What It Is
+Best Matching 25 — the most widely used keyword-based ranking algorithm. Powers traditional search engines. It scores documents by how well they match query keywords, considering term frequency, document frequency, and document length.
+
+### Core Concepts
+
+**1. The Formula**
+```
+score(Q, D) = Σ IDF(qi) × [ tf(qi,D) × (k1+1) ] / [ tf(qi,D) + k1 × (1 - b + b × |D|/avgdl) ]
+
+Where:
+  qi      = each query term
+  tf      = term frequency in document
+  IDF     = log((N - n(qi) + 0.5) / (n(qi) + 0.5))  — inverse doc frequency
+  k1      = 1.5  (saturation: diminishing returns for repeated terms)
+  b       = 0.75 (length normalization: penalizes long documents)
+  |D|     = document length
+  avgdl   = average document length in corpus
+```
+
+**2. Why Each Component Matters**
+```
+IDF: "the" appears in 180/200 docs → LOW weight (common, not informative)
+     "kubelet" appears in 3/200 docs → HIGH weight (rare, very informative)
+
+TF saturation (k1=1.5):
+     "disk" × 1  → score boost 1.0
+     "disk" × 5  → score boost 1.67 (NOT 5.0!)
+     Mentioning a word 50x isn't 50x better than once
+
+Length normalization (b=0.75):
+     Short doc mentioning "disk" → MORE relevant (focused)
+     Long doc mentioning "disk" → LESS relevant (incidental mention)
+```
+
+### Interview Deep Dive
+
+> **Q: BM25 vs TF-IDF — what's the difference?**
+> A: "TF-IDF is linear — term frequency 10 is scored 10x higher than frequency 1. BM25 adds saturation (k1 parameter) — frequency 10 is only ~2x better than 1. BM25 also adds document length normalization (b parameter). These make BM25 consistently outperform raw TF-IDF in retrieval benchmarks. BM25 is essentially 'TF-IDF done right.'"
+
+> **Q: Why use BM25 alongside FAISS? Isn't FAISS enough?**
+> A: "FAISS (vector search) captures MEANING — 'disk full' matches 'storage capacity exhausted.' But it might MISS exact terms — searching 'NodeFilesystemSpaceFillingUp' might not find the exact runbook because the embedding focuses on semantics, not spelling. BM25 catches exact keyword matches perfectly. Hybrid combines both: 60% FAISS + 40% BM25 = better recall than either alone."
+
+---
+
+## 🔷 Hybrid RAG (Retrieval Augmented Generation)
+
+### What It Is
+A retrieval strategy that combines vector search (semantic) + keyword search (lexical) via score fusion. This is the retrieval heart of OpsPilot.
+
+### Core Concepts
+
+**1. Score Fusion**
+```python
+final_score = alpha × norm(vector_score) + (1 - alpha) × norm(bm25_score)
+# alpha = 0.6 → 60% semantic, 40% keyword
+```
+
+**2. Why Normalize Scores**
+```
+FAISS scores: 0.0 to 1.0 (cosine similarity)
+BM25 scores:  0.0 to 20.0+ (unbounded)
+
+Without normalization: BM25 would dominate (bigger numbers)
+With normalization (divide by max): both are 0-1 → fair fusion
+```
+
+### Interview Deep Dive
+
+> **Q: How did you choose alpha=0.6?**
+> A: "Empirically, using DVC experiments against a 12-query gold evaluation set. I swept alpha from 0.4 to 0.8 in 0.1 steps and picked the value with the highest MRR. 0.6 worked best because most queries are descriptive (vector search excels) but some are exact alert names (BM25 excels). In production, I'd A/B test the top two values against real user feedback."
+
+> **Q: What is RAG and why does it matter?**
+> A: "Retrieval Augmented Generation: before asking the LLM to answer, first RETRIEVE relevant documents from a knowledge base, then pass them as context. This grounds the LLM's response in real data instead of its training data (which may be outdated or hallucinated). Without RAG, the LLM invents plausible-sounding but wrong answers. With RAG, it cites actual runbook sections."
+
+---
+
+# CATEGORY 4: AGENT & LLM LAYER
+
+---
+
+## 🔷 LangGraph
+
+### What It Is
+A framework by the LangChain team for building **stateful, multi-step AI agents** as state machines. Each step is a node (function), connected by edges (transitions).
+
+### Core Concepts
+
+**1. State Machine Architecture**
+```python
+from langgraph.graph import StateGraph
+from typing import TypedDict
+
+class AgentState(TypedDict):
+    incident: dict
+    query: str
+    anomaly_result: dict
+    retrieved_chunks: list
+    draft_response: dict
+    final_response: dict
+
+graph = StateGraph(AgentState)
+graph.add_node("parse", parse_node)
+graph.add_node("anomaly", anomaly_node)
+graph.add_node("retrieve", retrieve_node)
+graph.add_node("draft", draft_node)
+graph.add_node("validate", validate_node)
+
+graph.add_edge("parse", "anomaly")
+graph.add_edge("anomaly", "retrieve")
+graph.add_edge("retrieve", "draft")
+graph.add_edge("draft", "validate")
+graph.set_entry_point("parse")
+graph.set_finish_point("validate")
+
+agent = graph.compile()
+result = agent.invoke({"incident": request_data})
+```
+
+**2. How Nodes Work**
+```python
+def anomaly_node(state: AgentState) -> dict:
+    log_lines = state["log_lines"]
+    result = score_logs(log_lines)
+    return {"anomaly_result": result}  # Merged into state
+```
+Each node reads from state, does work, returns a dict that gets MERGED into state.
+
+**3. Deterministic vs Dynamic**
+```
+LangGraph (deterministic):     AgentExecutor (dynamic):
+  parse → anomaly → retrieve     LLM decides what to call
+  → draft → validate             Might skip anomaly
+  Always same order               Might call retrieve twice
+  Predictable, testable           Creative, flexible
+```
+
+### Interview Deep Dive
+
+> **Q: Why LangGraph over LangChain AgentExecutor?**
+> A: "AgentExecutor lets the LLM decide which tools to call and in what order. This is great for chatbots but dangerous for incident response. The LLM might skip the anomaly check, call retrieval twice, or enter an infinite loop. LangGraph enforces a deterministic order — parse, then anomaly, then retrieve, then draft, then validate. Every time. This is predictable, testable, and debuggable."
+
+> **Q: Why TypedDict for state instead of a Pydantic model?**
+> A: "LangGraph requires the state to be a TypedDict. TypedDict is lighter — no runtime validation overhead, no serialization cost. State is internal to the agent pipeline and already validated at the API boundary (Pydantic). Double-validating with Pydantic inside the agent would be wasteful."
+
+> **Q: How would you add conditional branching?**
+> A: "LangGraph supports conditional edges: `graph.add_conditional_edges('anomaly', router_fn, {'high': 'urgent_path', 'low': 'normal_path'})`. The `router_fn` inspects state and returns a string key that selects the next node. For example, if anomaly score > 0.8, route to an 'escalation' node that pages the on-call lead."
+
+---
+
+## 🔷 Ollama
+
+### What It Is
+A local LLM runtime — like having ChatGPT running on your machine. Downloads and runs open-source models (LLaMA, Mistral, Phi, Gemma) locally with zero cloud dependency.
+
+### Core Concepts
+
+**1. Basic Usage**
+```bash
+ollama serve                              # Start server on localhost:11434
+ollama pull llama3.2:3b-instruct-q4_K_M   # Download model (~2GB)
+ollama run llama3.2:3b                     # Interactive chat
+```
+
+**2. API Interface**
+```python
+resp = httpx.post("http://localhost:11434/api/generate", json={
+    "model": "llama3.2:3b-instruct-q4_K_M",
+    "prompt": system_prompt + user_prompt,
+    "stream": False  # Wait for full response
+})
+answer = resp.json()["response"]
+```
+
+**3. Model Naming Convention**
+```
+llama3.2:3b-instruct-q4_K_M
+│         │  │         │
+│         │  │         └── Quantization: 4-bit, K-quant Medium
+│         │  └── Instruct-tuned (follows instructions)
+│         └── 3 billion parameters
+└── Meta's LLaMA 3.2
+```
+
+### Interview Deep Dive
+
+> **Q: What is quantization and why q4_K_M?**
+> A: "Quantization reduces the precision of model weights from 32-bit floats to 4-bit integers. A 3B parameter model goes from ~12GB (32-bit) to ~2GB (4-bit). The 'K_M' means K-quant Medium — a quantization scheme that keeps important weights at higher precision. Quality loss is ~5-10% on benchmarks, but inference is 4-6x faster and uses 6x less RAM."
+
+> **Q: Why Ollama over OpenAI for an SRE tool?**
+> A: "Data privacy. SRE logs contain hostnames, IP addresses, internal service names, and infrastructure details. In regulated industries (healthcare, finance), sending this to OpenAI's servers may violate compliance requirements. Ollama runs entirely on-premises — data never leaves the network."
+
+---
+
+# CATEGORY 5: MLOps & PIPELINES
+
+---
+
+## 🔷 DVC (Data Version Control)
+
+### What It Is
+"Git for data." Tracks large files (datasets, models) alongside code without bloating the git repository. Also defines reproducible ML pipelines.
+
+### Core Concepts
+
+**1. How Data Tracking Works**
+```
+Without DVC:
+  git repo contains: 2GB dataset → repo is 2GB → 10 versions = 20GB
+
+With DVC:
+  git repo contains: dataset.dvc (200 bytes, pointer file)
+  data stored separately: S3, GCS, local disk
+  10 versions properly deduplicated
+```
+
+**2. Pipeline Stages (`dvc.yaml`)**
+```yaml
+stages:
+  train:
+    cmd: python scripts/train/train_anomaly.py
+    deps:
+      - scripts/train/train_anomaly.py
+      - artifacts/features.parquet
+    params:
+      - anomaly.n_estimators
+      - anomaly.contamination
+    outs:
+      - models/anomaly_model.pkl
+    metrics:
+      - artifacts/train_metrics.json:
+          cache: false
+```
+
+**3. Smart Caching**
+```bash
+dvc repro
+# Checks: have deps, params, or code changed since last run?
+# Yes → re-run the stage
+# No  → skip (cached result is still valid)
+# Result: only re-run what's necessary → fast iteration
+```
+
+**4. Experiment Tracking**
+```bash
+dvc exp run -S anomaly.contamination=0.02  # Run with different param
+dvc exp run -S retrieval.alpha=0.7         # Try different alpha
+dvc metrics diff                            # Compare results
+dvc exp show                                # Table of all experiments
+```
+
+### Interview Deep Dive
+
+> **Q: DVC vs MLflow for experiment tracking?**
+> A: "Different tools for different jobs. DVC tracks DATA versions and PIPELINE stages — 'which version of the dataset produced which model?' MLflow tracks EXPERIMENT metrics and MODEL artifacts — 'which hyperparameters gave the best accuracy?' We use both: DVC for pipeline reproducibility, MLflow for experiment comparison."
+
+> **Q: What's the difference between `deps` and `params` in dvc.yaml?**
+> A: "`deps` are files — scripts, data files. If the file content changes (checksum), DVC reruns the stage. `params` are values from `params.yaml` — numbers, strings. If a param value changes, DVC reruns. The difference: `params` are shown in `dvc params diff` for easy comparison, while `deps` are just tracked for change detection."
+
+> **Q: How does DVC handle remote storage?**
+> A: "`dvc remote add myremote s3://bucket/path` configures an S3 backend (or GCS, Azure, SSH). `dvc push` uploads data to remote. `dvc pull` downloads from remote. The `.dvc` files in git contain content hashes that point to the remote storage. This lets teams share large datasets without putting them in git."
+
+---
+
+## 🔷 MLflow
+
+### What It Is
+An open-source platform for managing the ML lifecycle: experiment tracking, model versioning, and deployment. Created by Databricks.
+
+### Core Concepts
+
+**1. Logging**
+```python
+import mlflow
+
+with mlflow.start_run(run_name="isolation_forest_v3"):
+    mlflow.log_params({
+        "n_estimators": 150,
+        "contamination": 0.01,
+        "max_samples": 256,
+    })
+    mlflow.log_metrics({
+        "train_time": 2.3,
+        "mean_score": 0.45,
+        "anomaly_pct": 0.012,
+    })
+    mlflow.log_artifact("models/anomaly_model.pkl")
+```
+
+**2. Comparing Experiments**
+```bash
+mlflow ui --port 5000    # Browse at localhost:5000
+# See all runs, compare metrics, visualize parameters
+```
+
+### Interview Deep Dive
+
+> **Q: MLflow vs Weights & Biases?**
+> A: "MLflow is open-source and self-hosted — data stays on your infrastructure. W&B is a SaaS product with better visualization and team collaboration features. For a solo project, MLflow is free and sufficient. For a team of 10+ ML engineers, W&B's experiment comparison UI and real-time dashboards justify the cost."
+
+---
+
+## 🔷 Prefect
+
+### What It Is
+A Python-native workflow orchestration framework. Schedules and monitors multi-step data/ML pipelines using simple decorators.
+
+### Core Concepts
+
+```python
+from prefect import flow, task
+
+@task(retries=2, retry_delay_seconds=30)
+def download_data():
+    subprocess.run(["python", "scripts/data/download_all.py"], check=True)
+
+@task(retries=1)
+def train_model():
+    subprocess.run(["python", "scripts/train/train_anomaly.py"], check=True)
+
+@flow(name="weekly-retrain")
+def weekly_retrain():
+    download_data()    # Retries twice if network fails
+    train_model()      # Runs after download succeeds
+```
+
+### Interview Deep Dive
+
+> **Q: Prefect vs Airflow?**
+> A: "Airflow is the enterprise standard — battle-tested at Google, Uber, Airbnb. But it requires a scheduler process, metadata database, webserver, and DAG files separate from your code. Prefect is Python-native — `@task` and `@flow` decorators on regular functions. For a solo project with 3 workflows, Prefect is dramatically simpler. For 50+ DAGs and a team of data engineers, Airflow is the better choice."
+
+> **Q: Why does Prefect use subprocess instead of direct imports?**
+> A: "Each script has its own heavy imports (sklearn, FAISS, sentence-transformers). Running via subprocess keeps tasks isolated — a memory leak in `train_anomaly.py` doesn't affect `build_index.py`. It also means each task can be independently tested and timed. This is the standard pattern for ML pipelines."
+
+---
+
+## 🔷 Evidently
+
+### What It Is
+An open-source ML monitoring library that detects **data drift** — when production data distribution shifts away from training data, making the model unreliable.
+
+### Core Concepts
+
+**1. What Is Drift?**
+```
+Training data:   Template T1 appears 30% of the time
+Production data: Template T1 appears 5% of the time ← DRIFTED!
+
+If >30% of features have drifted → model needs retraining
+```
+
+**2. Statistical Tests**
+```
+Kolmogorov-Smirnov (K-S) test:
+  Compares two distributions
+  Returns p-value: low p = distributions are different
+  Evidently runs this per feature column
+```
+
+**3. Usage**
+```python
+from evidently.report import Report
+from evidently.metric_preset import DataDriftPreset
+
+report = Report(metrics=[DataDriftPreset()])
+report.run(reference_data=train_df, current_data=prod_df)
+result = report.as_dict()
+# {"drift_detected": true, "drift_score": 0.45, ...}
+```
+
+### Interview Deep Dive
+
+> **Q: What triggers a retrain?**
+> A: "When `share_of_drifted_columns` exceeds a threshold (e.g., 30%). This means 30%+ of features have significantly different distributions in production vs training. The action: re-run the full pipeline (parse → features → train) on recent production logs. Compare the new model against the old in MLflow before deploying."
+
+> **Q: What's the difference between data drift and concept drift?**
+> A: "Data drift = input distribution changes (different log patterns). Concept drift = the relationship between input and output changes (what 'anomalous' means has changed). Evidently detects data drift. Concept drift requires monitoring model predictions against ground truth labels, which we don't have for unsupervised anomaly detection."
+
+---
+
+# CATEGORY 6: INFRASTRUCTURE & DEVOPS
+
+---
+
+## 🔷 Docker & Docker Compose
+
+### What It Is
+Docker packages your application and its dependencies into a **container** — a lightweight, portable, reproducible environment. Docker Compose orchestrates multiple containers as services.
+
+### Core Concepts
+
+**1. Dockerfile Anatomy**
+```dockerfile
+FROM python:3.11-slim                    # Base image
+WORKDIR /app                             # Set working directory
+RUN pip install poetry                   # Install tools
+COPY pyproject.toml poetry.lock ./       # Copy dependency files first
+RUN poetry install --no-dev              # Install deps (cached layer!)
+COPY src/ ./src/                         # Copy source code
+RUN mkdir -p /app/models /app/artifacts  # Create runtime dirs
+CMD ["uvicorn", "opspilot.api.main:app", "--host", "0.0.0.0"]
+```
+
+**2. Layer Caching (Critical for fast builds)**
+```
+Layer 1: FROM python:3.11-slim       ← cached (never changes)
+Layer 2: pip install poetry           ← cached
+Layer 3: COPY pyproject.toml          ← cached (deps don't change often)
+Layer 4: poetry install               ← cached (only reruns when deps change)
+Layer 5: COPY src/                    ← rebuilt (code changes every push)
+
+Key: put things that change RARELY first, things that change OFTEN last
+```
+
+**3. Docker Compose — Multi-Service Orchestration**
+```yaml
+services:
+  api:
+    build: {context: ., dockerfile: docker/api.Dockerfile}
+    ports: ["8000:8000"]
+    depends_on: [postgres, redis]
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: opspilot
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml
+```
+
+**4. Docker Networking**
+```
+Inside Docker Compose:
+  api connects to postgres:5432    (service name, NOT localhost)
+  api connects to redis:6379       (service name)
+  api connects to ollama:11434     (service name)
+  
+Outside Docker (from your browser):
+  You access api at localhost:8000   (port mapping)
+  You access grafana at localhost:3000
+```
+
+### Interview Deep Dive
+
+> **Q: Docker vs virtual machines?**
+> A: "VMs include a full OS (kernel + userspace) — heavy, slow to start, gigabytes in size. Docker containers share the host kernel and only package the application layer — lightweight, start in seconds, megabytes in size. VMs provide stronger isolation (separate kernel). Containers provide sufficient isolation for microservices with much better efficiency."
+
+> **Q: What is layer caching and why does it matter?**
+> A: "Each Dockerfile instruction creates a layer. Docker caches unchanged layers. If you COPY pyproject.toml first and install deps, then COPY source code — code changes only rebuild the last layer. If you COPY everything first, every code change rebuilds deps too (5+ minutes wasted). This is why we separate dependency installation from code copy."
+
+> **Q: Why `docker compose` instead of Kubernetes?**
+> A: "Docker Compose is for dev/staging — one file, one command, runs locally. Kubernetes is for production — auto-scaling, rolling deployments, self-healing, but requires a cluster, kubectl knowledge, and YAML manifests for every resource. For a portfolio project, Compose is appropriate. In production, I'd use K8s with Helm charts."
+
+> **Q: What does `depends_on` do?**
+> A: "It controls startup ORDER — postgres starts before api. But it doesn't wait for postgres to be READY (accepting connections). For that, you need a health check or a wait script: `until pg_isready; do sleep 1; done`. `depends_on` with `condition: service_healthy` and a proper healthcheck is the production pattern."
+
+---
+
+## 🔷 Prometheus & Grafana
+
+### What It Is
+**Prometheus**: Time-series database + metrics scraper. Collects numeric metrics from your services every N seconds.
+**Grafana**: Dashboard visualization tool. Queries Prometheus and renders charts, graphs, and alerts.
+
+### Core Concepts
+
+**1. Metric Types**
+```
+Counter:   Only goes up (total requests, total errors)
+           http_requests_total{status="200"} = 4521
+
+Gauge:     Goes up and down (active connections, CPU usage)
+           active_connections = 12
+
+Histogram: Distribution in buckets (request latency)
+           http_request_duration_seconds_bucket{le="0.1"} = 95
+           http_request_duration_seconds_bucket{le="0.5"} = 99
+           http_request_duration_seconds_bucket{le="1.0"} = 100
+```
+
+**2. The Pull Model**
+```
+Your API:       exposes GET /metrics → text format with all current metric values
+Prometheus:     scrapes GET /metrics every 10 seconds → stores time-series
+Grafana:        queries Prometheus with PromQL → renders dashboards
+```
+
+**3. PromQL (Prometheus Query Language)**
+```
+rate(http_requests_total[5m])                    # Requests per second over 5 min
+histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))  # p95 latency
+sum(rate(http_requests_total{status=~"5.."}[5m]))  # Error rate
+```
+
+### How OpsPilot Uses It
+```python
+from prometheus_fastapi_instrumentator import Instrumentator
+
+Instrumentator(excluded_handlers=["/health", "/metrics"]).instrument(app).expose(app)
+# Auto-adds: request count, latency histogram, status codes per endpoint
+# Accessible at: GET /metrics
+```
+
+### Interview Deep Dive
+
+> **Q: Why Prometheus over Datadog/New Relic?**
+> A: "Prometheus is open-source and self-hosted — no per-host fees. For a portfolio project, it's free. Datadog charges $15-23/host/month, which adds up with 8 Docker services. In enterprise, Datadog's UI, alerting, and APM are worth the cost. For learning and demos, Prometheus + Grafana is the industry-standard open-source stack."
+
+> **Q: Why exclude /health and /metrics from instrumentation?**
+> A: "Health checks run every 10 seconds per container. With 8 containers, that's 48 health checks/minute. Including them floods metrics with noise, making it impossible to see real API trends. The /metrics endpoint is called by Prometheus — instrumenting it would create infinite recursion."
+
+> **Q: What's the difference between push and pull metrics?**
+> A: "Pull (Prometheus): the monitoring system scrapes your metrics endpoint. Your app just exposes data. Simple, no lost data if monitoring restarts. Push (StatsD, Datadog Agent): your app sends metrics to a collector. Better for short-lived jobs and serverless. Prometheus pull is standard for long-running services."
+
+---
+
+## 🔷 PostgreSQL / SQLite
+
+### What It Is
+**SQLite**: Embedded database stored as a single file. Zero setup.
+**PostgreSQL**: Full-featured, production-grade relational database.
+
+### Core Concepts
+
+**1. The Switch Pattern**
+```python
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///opspilot.db")
+# Local dev: sqlite:///opspilot.db  (zero setup, single file)
+# Docker:    postgresql+psycopg://opspilot:opspilot@postgres:5432/opspilot
+# Change: one environment variable. Zero code changes.
+```
+
+**2. SQLite Limitations**
+```
+✅ Zero setup (single file)
+✅ No server needed
+❌ Single writer (locks entire DB on write)
+❌ No concurrent connections from different processes
+❌ No real authentication/permissions
+→ Perfect for: dev, testing, single-user apps
+```
+
+**3. PostgreSQL Advantages**
+```
+✅ Many concurrent readers and writers
+✅ Full ACID transactions with isolation levels
+✅ Indexing (B-tree, GIN, GiST)
+✅ JSON/JSONB support
+✅ Authentication and roles
+→ Perfect for: production, multi-user, any real deployment
+```
+
+### Interview Deep Dive
+
+> **Q: How does the same code work with both SQLite and Postgres?**
+> A: "SQLModel/SQLAlchemy abstracts the database engine. The `create_engine(DATABASE_URL)` call creates the appropriate driver based on the URL scheme — `sqlite:///` for SQLite, `postgresql+psycopg://` for Postgres. All SQL queries are generated by the ORM, not written manually, so dialect differences are handled automatically."
+
+---
+
+## 🔷 Redis
+
+### What It Is
+An in-memory key-value store used for caching, session storage, and message queuing. Data is stored in RAM for sub-millisecond access.
+
+### How OpsPilot Uses It
+```python
+# Embedding cache (reduces re-computation):
+cache_key = sha256(text)
+cached = redis.get(cache_key)
+if cached:
+    return deserialize(cached)  # Instant!
+result = model.encode(text)      # ~50ms
+redis.setex(cache_key, 3600, serialize(result))  # Cache for 1 hour
+```
+
+### Interview Deep Dive
+
+> **Q: Redis vs diskcache?**
+> A: "diskcache stores on disk — survives restarts but slower (~1ms reads). Redis stores in RAM — sub-millisecond reads but data lost on restart (unless persistence enabled). For OpsPilot, we use diskcache for embedding cache (persistence matters) and Redis in Docker for shared caches across services."
+
+> **Q: What Redis data structures do you know?**
+> A: "Strings (simple key-value), Lists (ordered, for queues), Sets (unique values), Sorted Sets (ranked data, leaderboards), Hashes (field-value maps, like Python dicts), Streams (event logs). For caching, we use Strings with TTL. For rate limiting, sorted sets with timestamps."
+
+---
+
+## 🔷 GitHub Actions (CI/CD)
+
+### What It Is
+GitHub's built-in CI/CD platform. Runs automated workflows (lint, test, build) on every push, pull request, or schedule.
+
+### Core Concepts
+
+**1. Workflow Structure**
+```yaml
+name: CI                     # Workflow name
+on:
+  push:
+    branches: [main]         # Trigger on push to main
+  pull_request:
+    branches: [main]         # Trigger on PRs targeting main
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest   # Free runner
+    steps:
+      - uses: actions/checkout@v4     # Clone repo
+      - uses: actions/setup-python@v5  # Install Python
+      - run: poetry install            # Install deps
+      - run: ruff check src/           # Lint
+      - run: pytest tests/             # Test
+```
+
+**2. Matrix Strategy**
+```yaml
+strategy:
+  matrix:
+    service: [api, ui]    # Runs TWO parallel jobs: one for api, one for ui
+steps:
+  - run: docker build -f docker/${{ matrix.service }}.Dockerfile .
+```
+
+**3. Path Filtering**
+```yaml
+on:
+  push:
+    paths:
+      - "src/**"          # Only trigger when source code changes
+      - "docker/**"       # Or Docker files change
+      # Editing README.md won't trigger this workflow
+```
+
+### Interview Deep Dive
+
+> **Q: What are your CI gates?**
+> A: "Three gates on every push: (1) `ruff check` — catches unused imports, bad patterns, style issues. (2) `ruff format --check` — enforces consistent code formatting. (3) `pytest` — runs all 16 tests with mock LLM and SQLite. All three must pass for the commit to be accepted. Docker builds are a separate workflow triggered only when Docker-related files change."
+
+> **Q: CI vs CD — what do you have?**
+> A: "We have CI (Continuous Integration): lint, test, Docker build on every push. We don't have CD (Continuous Deployment): images build but don't auto-push to a registry or auto-deploy. In production, I'd add ArgoCD for GitOps deployment to Kubernetes, with canary rollouts and automatic rollback on error rate spikes."
+
+---
+
+## 🔷 Poetry
+
+### What It Is
+A Python dependency manager and build tool. Uses a SAT solver for dependency resolution and a lockfile (`poetry.lock`) for reproducible installs.
+
+### Core Concepts
+
+**1. pyproject.toml (single config)**
+```toml
+[tool.poetry.dependencies]        # Main deps
+python = "^3.11"
+fastapi = "^0.112.0"
+
+[tool.poetry.group.dev.dependencies]  # Dev-only deps
+pytest = "^8.3.2"
+ruff = "^0.5.7"
+```
+
+**2. Version Pinning with `^`**
+```
+"^0.112.0" = >=0.112.0, <0.113.0   (minor updates OK, major breaks NOT)
+"^2.8.2"   = >=2.8.2, <3.0.0       (patches and minor OK, major breaks NOT)
+"==4.2.1"  = exactly this version    (drain3 pins cachetools like this!)
+```
+
+**3. The Lockfile**
+```
+poetry.lock: exact transitive versions for EVERY dependency
+  fastapi==0.112.0 → starlette==0.38.2 → anyio==4.4.0 → ...
+  
+Every developer, CI server, and Docker build gets identical versions.
+No "works on my machine" issues.
+```
+
+### Interview Deep Dive
+
+> **Q: Poetry vs pip — when does it matter?**
+> A: "For simple projects, pip + requirements.txt is fine. Poetry matters when: (1) you have a complex dependency tree with potential conflicts — Poetry's SAT solver gives clear errors vs pip's cryptic backtracking failures. (2) you need reproducible builds — poetry.lock pins ALL transitive deps. (3) you need dependency groups — dev, test, optional extras. We hit the exact case where pip failed (cachetools conflict) and Poetry gave a clear resolution."
+
+> **Q: Why did `--without` not fix the cachetools conflict?**
+> A: "Poetry resolves ALL declared groups BEFORE installing anything. `--without` only controls which packages get installed, not which get resolved. Even if you `--without workflows`, Poetry still tries to find compatible versions across ALL groups. If they're irreconcilable, the resolution fails. The fix: remove conflicting packages from pyproject.toml entirely."
+
+---
+
+# CATEGORY 7: TESTING & CODE QUALITY
+
+---
+
+## 🔷 pytest
+
+### What It Is
+The standard Python testing framework. Discovered test files (`test_*.py`), test functions (`test_*`), and provides fixtures, assertions, and plugins.
+
+### Core Concepts
+
+**1. Test Structure**
+```python
+def test_health_endpoint(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+```
+
+**2. Fixtures**
+```python
+@pytest.fixture
+def client():
+    app = create_app()
+    return TestClient(app)
+
+@pytest.fixture(autouse=True)     # Runs for EVERY test automatically
+def mock_env(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+```
+
+**3. TestClient (FastAPI-specific)**
+```python
+from fastapi.testclient import TestClient
+client = TestClient(app)
+# Calls the app in-process — no server needed
+# Tests run in milliseconds
+```
+
+**4. monkeypatch**
+```python
+def test_with_mock_env(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "mock")  # Set env var
+    # ... test code ...
+    # monkeypatch auto-reverts after test finishes!
+    # No env var leakage between tests
+```
+
+### Interview Deep Dive
+
+> **Q: What are contract tests vs integration tests?**
+> A: "Contract tests verify the shape of API responses — status codes, required fields, JSON structure. They don't test business logic. Integration tests verify that the full pipeline works correctly — does the anomaly score make sense? Does retrieval return relevant results? Contract tests are fast (mock everything) and catch schema regressions. Integration tests are slow (real dependencies) and catch logic bugs. We run contract tests in CI (fast gate) and integration tests manually."
+
+> **Q: Why `monkeypatch` instead of `os.environ`?**
+> A: "`os.environ['X'] = 'Y'` modifies the process-wide environment. If one test sets `LLM_PROVIDER=ollama`, ALL subsequent tests see that value — causing flaky failures. `monkeypatch.setenv()` automatically reverts the change after the test finishes. This isolation is critical for reliable test suites."
+
+> **Q: What does `autouse=True` do?**
+> A: "The fixture runs automatically for EVERY test without needing to be listed as a parameter. Our `mock_env` fixture sets `LLM_PROVIDER=mock` and `AUTH_ENABLED=false` for every test — no test can accidentally call a real LLM or require JWT tokens. This prevents entire categories of flaky failures."
+
+---
+
+## 🔷 ruff
+
+### What It Is
+A Python linter AND formatter written in Rust. Replaces flake8, isort, black, pyflakes, and pycodestyle — 10-100x faster than all of them combined.
+
+### Core Concepts
+
+**1. Linting (catches bugs and bad patterns)**
+```bash
+ruff check src/ tests/ scripts/
+# E501: Line too long
+# F401: Imported but unused
+# F841: Local variable assigned but never used
+# RUF015: Prefer list() over [x for x in y]
+```
+
+**2. Formatting (enforces consistent style)**
+```bash
+ruff format src/ tests/ scripts/
+# Consistent indentation, line length, quote style, trailing commas
+```
+
+**3. Auto-fix**
+```bash
+ruff check --fix src/     # Auto-fix safe issues (unused imports, etc.)
+```
+
+### Interview Deep Dive
+
+> **Q: Why ruff over flake8 + black + isort?**
+> A: "Ruff replaces all three with one tool that's 10-100x faster (written in Rust). One config in pyproject.toml instead of three separate configs. One `ruff check` and `ruff format` instead of three separate commands. Same rules, dramatically faster developer experience."
+
+---
+
+## 🔷 Pre-commit
+
+### What It Is
+A framework for managing git hooks. Runs checks (lint, format, validate) automatically before every `git commit`.
+
+### Core Concepts
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    hooks:
+      - id: ruff          # Lint
+        args: [--fix]      # Auto-fix issues
+      - id: ruff-format   # Format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files   # Block files >500KB
+```
+
+```bash
+pre-commit install   # Setup (run once after clone)
+git commit -m "..."  # Pre-commit hooks run automatically before commit
+```
+
+### Interview Deep Dive
+
+> **Q: Why pre-commit hooks instead of just CI?**
+> A: "Pre-commit catches issues BEFORE they're pushed — faster feedback loop. CI catches them AFTER push — 30-second delay. With pre-commit, the developer sees lint errors immediately, fixes them locally, and pushes clean code. Without pre-commit, the developer pushes broken code → CI fails → they fix and push again → wasted time."
+
+---
+
+## 🔷 Streamlit
+
+### What It Is
+A Python-only framework for building web dashboards. No HTML, CSS, or JavaScript needed. Used for OpsPilot's incident response console.
+
+### Core Concepts
+
+```python
+import streamlit as st
+
+st.title("🚀 OpsPilot — Incident Response Console")
+
+with st.sidebar:
+    alert = st.text_input("Alert Title")
+    logs = st.text_area("Log Lines")
+    analyze = st.button("🔍 Analyze")
+
+if analyze:
+    with st.spinner("Analyzing..."):
+        resp = httpx.post(API_URL, json=payload)
+    
+    tab1, tab2, tab3 = st.tabs(["Summary", "Context", "Actions"])
+    with tab1:
+        st.metric("Anomaly Score", resp["anomaly_report"]["score"])
+    with tab2:
+        for chunk in resp["retrieved_context"]:
+            with st.expander(chunk["title"]):
+                st.write(chunk["text"])
+```
+
+### Interview Deep Dive
+
+> **Q: Why Streamlit over React?**
+> A: "For an internal SRE tool, development speed beats pixel-perfect UI. Streamlit: 102 lines of Python → full working dashboard. React: 500+ lines across multiple files + npm build pipeline + API client setup. We can always migrate to React later if the team needs a more polished frontend. Streamlit works for prototyping and internal tools."
+
+> **Q: Streamlit limitations?**
+> A: "Three main ones: (1) Reruns entire script on every interaction — not ideal for complex state. (2) No fine-grained CSS control — limited customization. (3) Not designed for public-facing apps with many concurrent users. For production SRE dashboards, I'd consider Grafana dashboards or a React frontend."
+
+---
+
+## 🔷 structlog
+
+### What It Is
+A structured logging library that outputs JSON instead of plain text. Machine-readable, filterable, and searchable.
+
+### Core Concepts
+
+**1. Plain text vs structured**
+```
+Plain text (Python default):
+  INFO:root:Request received from 192.168.1.5
+
+Structured JSON (structlog):
+  {"event": "request_received", "ip": "192.168.1.5", "level": "info", "timestamp": "2026-02-24T10:00:00Z"}
+```
+
+**2. Context Binding**
+```python
+log = structlog.get_logger()
+log = log.bind(service="api", version="0.1.0")  # Add persistent context
+log.info("request_received", ip="192.168.1.5")
+# Output includes service="api" AND ip="192.168.1.5"
+```
+
+**3. Processor Chain**
+```
+log.info("event", key=value)
+    ↓ add_log_level    → {"level": "info"}
+    ↓ TimeStamper      → {"timestamp": "..."}
+    ↓ JSONRenderer     → JSON string
+    ↓ stdout
+```
+
+### Interview Deep Dive
+
+> **Q: Why structured logging in production?**
+> A: "Monitoring tools (Elasticsearch, CloudWatch, Splunk, Loki) can parse JSON automatically. You can filter: 'show me all ERROR logs from the anomaly service in the last hour.' With plain text, you'd need regex parsing — fragile and slow. Every production system at Google, Amazon, and Netflix uses structured logging."
+
+---
+
+> **🎓 STUDY TIP:** For each technology above, be able to answer three things from memory:
+> 1. **What** it does (one sentence)
+> 2. **Why** you chose it over alternatives (the tradeoff)
+> 3. **How** it works internally (one level deeper than "it just works")
+>
+> If you can do that for all 30+ technologies, you'll demonstrate FAANG-level breadth AND depth.
