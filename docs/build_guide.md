@@ -4586,3 +4586,617 @@ Everything else — Drain3 log parsing, IsolationForest scoring, hybrid FAISS+BM
 4. **Where the gaps are** — and how you'd fill them
 
 **Why this comeback works:** Instead of apologizing for 16 tests, you're explaining your *testing strategy*. You tested the highest-risk components first. An interviewer who hears "I tested safety validation with 6 edge cases and every API contract" is more impressed than someone who says "I have 200 tests" but can't explain what they cover.
+
+---
+
+# 🧭 5W1H QUICK-REFERENCE TABLE — Every Component at a Glance
+
+> For each major component, this table answers **What** it is, **Why** we chose it, **Where** it lives in the codebase, **When** it runs, **Who** interacts with it, and **How** it works internally.
+
+---
+
+## Infrastructure & Framework Components
+
+| Component | What | Why | Where | When | Who | How |
+|-----------|------|-----|-------|------|-----|-----|
+| **FastAPI** | Python ASGI web framework | Native async, auto Swagger docs, Pydantic validation — Flask/Django can't match all three | `src/opspilot/api/main.py` | App startup (`uvicorn opspilot.api.main:app`) | Backend developers, API consumers | App factory `create_app()` → registers routers → instruments metrics → returns `app` |
+| **Pydantic** | Data validation library (v2, Rust core) | Auto-validates every request/response, generates OpenAPI schema, catches bad input before it hits business logic | `src/opspilot/api/schemas.py` | Every HTTP request (deserialization) and response (serialization) | FastAPI (auto), tests (manual model construction) | Declares `BaseModel` classes with typed fields → FastAPI deserializes JSON into these → returns 422 on mismatch |
+| **Poetry** | Python dependency manager with SAT solver | Lockfile guarantees reproducible installs; pip's resolver fails on complex trees (we hit this with cachetools) | `pyproject.toml`, `poetry.lock` | `poetry install` during setup, CI, Docker builds | Developers, CI runner, Docker builder | Reads `[tool.poetry.dependencies]` → SAT-solves all versions → writes `poetry.lock` → installs exact versions |
+| **Docker Compose** | Multi-container orchestrator | One command starts 8 services with correct networking; eliminates "works on my machine" | `docker-compose.yml`, `docker/` | `docker compose up` for full-stack dev/demo | Developers, demo audience | Reads YAML → creates virtual network → starts containers in dependency order → services find each other by name |
+| **structlog** | Structured JSON logging library | Machine-readable logs (Elasticsearch, CloudWatch ingest); grep-friendly; context binding with `.bind()` | `src/opspilot/observability/logging.py` | Every log statement across the entire app | Developers (debugging), monitoring tools (alerting) | Processor chain: `add_log_level` → `TimeStamper` → `JSONRenderer` → stdout |
+| **Prometheus + Grafana** | Metrics collection + dashboard visualization | Industry standard; auto-tracks latency histograms, request counts, status codes per endpoint | `src/opspilot/observability/metrics.py`, `docker/prometheus.yml` | Prometheus scrapes `/metrics` every 10s; Grafana queries on-demand | SREs (dashboards), alerting rules | `Instrumentator` wraps every route → exposes `/metrics` in text format → Prometheus stores time-series → Grafana queries with PromQL |
+| **JWT Auth** | Stateless token-based authentication | No session store needed; works across load-balanced instances; token carries role claims | `src/opspilot/api/deps.py` | Every authenticated request (`AUTH_ENABLED=true`) | API consumers, admin users | Client sends `Authorization: Bearer <token>` → `jwt.decode()` validates signature + expiry → `require_role()` checks role claim |
+| **SQLModel** | ORM combining SQLAlchemy + Pydantic | One class = database table + API schema; no duplicate definitions | `src/opspilot/storage/db.py`, `models.py` | Database reads/writes (feedback, incidents) | Route handlers via `Depends(get_session)` | `class FeedbackRow(SQLModel, table=True)` → `create_all()` generates `CREATE TABLE` → `session.add/commit` for CRUD |
+| **Streamlit** | Python-only frontend framework | Full dashboard in 102 lines; no HTML/CSS/JS; hot reload; built-in widgets | `ui/streamlit_app.py` | `streamlit run ui/streamlit_app.py` | On-call SREs (incident analysis UI) | Python script → Streamlit renders widgets → user fills form → `httpx.post()` calls API → renders response in tabs |
+
+---
+
+## ML & AI Components
+
+| Component | What | Why | Where | When | Who | How |
+|-----------|------|-----|-------|------|-----|-----|
+| **Drain3** | Streaming log template mining | Unsupervised — discovers patterns automatically; no regex maintenance; handles evolving log formats | `drain3.ini` (config), `scripts/features/parse_logs.py` (offline), `src/opspilot/anomaly/features.py` (online) | Offline: during `parse_logs.py` training. Online: every `/anomaly/score` and `/incident/analyze` request | ML pipeline (offline), API (online) | Fixed-depth parse tree (depth=4) + similarity-based merging (sim_th=0.4); variable tokens → `<*>` wildcards; masking replaces numbers/hex before parsing |
+| **IsolationForest** | Unsupervised anomaly detection (scikit-learn) | No labels needed; trains in seconds; infers in <1ms; 2MB model; no GPU | `scripts/train/train_anomaly.py` (train), `src/opspilot/anomaly/infer.py` (infer) | Train: `make train` or `dvc repro`. Infer: every anomaly scoring request | ML pipeline (train), API (score) | 100 random trees × 256 samples each; anomalies isolated in few splits (short path = anomalous); `decision_function()` → normalize `0.5 - raw` → clamp [0,1] |
+| **all-MiniLM-L6-v2** | Sentence embedding model (384-dim, 80MB) | Free, local, CPU-only, good quality (58.8 MTEB); data stays on-premises | `src/opspilot/embeddings/encoder.py` | Index build time (all chunks) and query time (each search) | RAG pipeline, embedding cache | `SentenceTransformer.encode(texts, normalize_embeddings=True)` → 384-dim unit vectors; cached with `diskcache` (SHA-256 key) |
+| **FAISS IndexFlatIP** | Brute-force vector similarity search (Facebook) | Exact results; <1ms for ~1000 chunks; zero infrastructure; in-process | `src/opspilot/rag/index.py` | Every retrieval query (vector search half) | Hybrid retriever | Stores N×384 float matrix; `search(query_vec, k)` computes dot product against all vectors → returns top-k indices + scores |
+| **BM25 (rank-bm25)** | Keyword-based ranking algorithm | Catches exact term matches FAISS misses (e.g., "NodeFilesystemSpaceFillingUp"); 30+ year proven standard | `src/opspilot/rag/bm25.py` | Every retrieval query (keyword search half) | Hybrid retriever | TF-IDF with saturation (k1=1.5) + length normalization (b=0.75); IDF weights rare terms higher; combines with FAISS via alpha-weighted fusion |
+| **LangGraph** | Stateful agent framework (LangChain team) | Deterministic 5-node pipeline; each node is a pure function (unit-testable); LLM can't skip steps or call tools twice | `src/opspilot/agent/graph.py` | Every `/incident/analyze` request | Agent orchestrator | `StateGraph(AgentState)` → `add_node()` for each step → `add_edge()` for order → `compile()` → `invoke(state)` runs pipeline |
+| **Safety Validator** | Groundedness filter for LLM actions | Prevents hallucinated actions from reaching users; set-intersection check is mathematically guaranteed | `src/opspilot/agent/safety.py` | After every `draft_node` (LLM response), before API return | validate_node in the agent pipeline | For each action: check `action.evidence_doc_ids ⊂ retrieved_doc_ids`; if not subset → silently remove action |
+
+---
+
+## MLOps Components
+
+| Component | What | Why | Where | When | Who | How |
+|-----------|------|-----|-------|------|-----|-----|
+| **DVC** | Data Version Control — Git for data + pipeline DAGs | Tracks large files without bloating repo; `dvc repro` reruns only changed stages; `dvc metrics diff` compares experiments | `dvc.yaml`, `dvc.lock`, `params.yaml`, `.dvc/` | `dvc repro` for full pipeline; `dvc exp run` for experiments | ML engineers, CI pipeline | 6 stages: download → parse → features → train → index → eval; each stage has `deps`, `params`, `outs`, `metrics`; smart caching skips unchanged stages |
+| **MLflow** | Experiment tracking + model registry | Logs hyperparameters, metrics, model artifacts; compare runs in UI; reproducible training | `scripts/train/train_anomaly.py` (logging), `mlruns/` (local store) | Every `make train` run | ML engineers (experiment comparison) | `mlflow.log_params({...})` + `mlflow.log_metrics({...})` + `mlflow.log_artifact(model.pkl)` → browse at localhost:5000 |
+| **Prefect** | Python-native workflow orchestrator | Decorator-based (`@flow`, `@task`); retries; monitoring UI; dramatically simpler than Airflow | `src/opspilot/workflows/prefect_flows.py` | Nightly reindex, weekly retrain, on-demand full pipeline | ML engineers, automated schedules | `@task(retries=2)` decorators → `@flow` composes tasks → `subprocess.run()` calls scripts → Prefect tracks status/logs |
+| **Evidently** | Feature distribution drift detection | Statistical tests (K-S, PSI) out of the box; JSON + HTML reports; ML-specific (not just data quality) | `src/opspilot/workflows/drift.py` | After retraining or periodic checks | ML engineers, automated monitoring | Compare reference (training) vs current (production) feature DataFrames → K-S test per column → `share_of_drifted_columns` → alert if threshold exceeded |
+
+---
+
+# 🚨 COMMON MISTAKES BY PHASE — What Goes Wrong & How to Fix It
+
+> These are the mistakes you WILL make if you rebuild OpsPilot from scratch. Learn them here so you don't waste hours debugging.
+
+---
+
+## Phase 1: Foundation & Scaffolding
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 1 | Forgetting `__init__.py` in a package directory | `ModuleNotFoundError: No module named 'opspilot.rag'` — Python doesn't recognize the folder as a package | Add an empty `__init__.py` (with a one-line docstring for PEP 257) to every directory under `src/opspilot/` |
+| 2 | Putting code directly in project root instead of `src/opspilot/` | Python imports the local directory instead of the installed package; tests pass locally but fail in CI/Docker | Always use the `src/` layout: importable code goes in `src/opspilot/`, scripts go in `scripts/` |
+| 3 | Creating `opspilot/` at root instead of `src/opspilot/` | `from opspilot import ...` accidentally imports the local folder, not the pip-installed package; leads to mysterious `AttributeError` bugs | Match `packages = [{ include = "opspilot", from = "src" }]` in `pyproject.toml` — this tells Poetry where to look |
+| 4 | Forgetting `pythonpath = ["src"]` in `[tool.pytest.ini_options]` | `pytest` can't find `opspilot` → `ModuleNotFoundError` during test collection | Add `pythonpath = ["src"]` to `pyproject.toml` under `[tool.pytest.ini_options]` |
+
+---
+
+## Phase 2: API Skeleton + Observability
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 5 | Forgetting `prefix=` when registering a router | All routes in `incident.py` appear at `/analyze` instead of `/incident/analyze` — URL clashes with other routers | Always specify: `app.include_router(incident_router, prefix="/incident", tags=["incident"])` |
+| 6 | Using `default=[]` instead of `Field(default_factory=list)` for list fields | All instances share the SAME list object — appending to one mutates all others (classic Python mutable default bug) | Always use `Field(default_factory=list)` for mutable defaults in Pydantic models |
+| 7 | Creating `app = FastAPI()` at module level without app factory | Tests leak state between runs — a failed test can corrupt the app for subsequent tests | Wrap in `create_app()` function; call it to get fresh instances in tests |
+| 8 | Not excluding `/health` and `/metrics` from Prometheus instrumentation | Health check noise floods metrics — 48 checks/minute across 8 containers drowns real API trends | Pass `excluded_handlers=["/health", "/metrics"]` to `Instrumentator()` |
+| 9 | Forgetting `tags=["section"]` on router registration | Swagger UI shows all endpoints in one flat list — impossible to navigate with 8+ endpoints | Always add `tags=["incident"]` etc. to group endpoints in the Swagger UI |
+
+---
+
+## Phase 3: Data Download Scripts
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 10 | Forgetting `--depth 1` on `git clone` | Downloads full git history of loghub (hundreds of MB) instead of just the latest commit; wastes bandwidth and disk | Always use `git clone --depth 1 <url>` for data repos you only need the latest version of |
+| 11 | Downloading to `data/raw/` directly instead of `external/` first | DVC tracking gets confused; re-running download overwrites DVC-tracked files | Clone to `external/` (gitignored), then copy specific files to `data/raw/` (DVC-tracked) |
+| 12 | Not setting `check=True` on `subprocess.run()` | Script silently continues after a failed download → subsequent steps crash with cryptic "file not found" errors | Always use `subprocess.run([...], check=True)` to fail immediately on error |
+
+---
+
+## Phase 4: RAG Pipeline
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 13 | Building FAISS index and metadata in different orders | FAISS position #42 points to doc A, but `meta.jsonl` line #42 points to doc B — completely wrong results that look plausible | Ensure both vectors and metadata are written in the exact same iteration order; add `assert len(vectors) == len(metadata)` |
+| 14 | Forgetting `normalize_embeddings=True` in `encoder.py` | Dot product ≠ cosine similarity; FAISS `IndexFlatIP` returns meaningless scores; long documents unfairly dominate short ones | Always pass `normalize_embeddings=True` to `model.encode()` — this makes inner product = cosine similarity |
+| 15 | BM25 crashing on empty corpus | `ZeroDivisionError` in `rank_bm25` when the docstore has zero documents (e.g., index not built yet) | Add early return guard: `if not self.corpus: return []` before BM25 scoring |
+| 16 | Not clearing `@lru_cache` after rebuilding the FAISS index | Old index stays cached in memory — API serves stale results even after `make index` rebuilt the files on disk | Call `POST /admin/clear-cache` after rebuilding, or restart the API server |
+| 17 | Fetching only `top_k` (not `top_k * 2`) from each source before fusion | After score normalization and fusion, some good candidates get lost — final results are worse than either source alone | Fetch `top_k * 2` from both FAISS and BM25, then fuse and return only `top_k` |
+| 18 | Not adding the document title/section prefix to chunks | Chunks from different runbooks about the same topic have nearly identical vectors — retriever can't distinguish them | Prepend `"title | section\n"` to each chunk text before embedding |
+
+---
+
+## Phase 5: Anomaly Detection Pipeline
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 19 | Using a different Drain3 config (or no config) for online vs offline parsing | Online featurizer discovers different templates than training → feature vector positions mismatch → model produces garbage scores | Both offline (`parse_logs.py`) and online (`features.py`) must use the same `drain3.ini` configuration |
+| 20 | Not sharing `anomaly_vocab.json` between training and inference | Position #0 means "disk full" during training but "user login" during inference → model sees random noise | Both pipelines load the SAME `artifacts/anomaly_vocab.json`; never regenerate vocab without retraining |
+| 21 | Reversing the score normalization (`0.5 + raw` instead of `0.5 - raw`) | Score of 1.0 means "normal" and 0.0 means "anomalous" — opposite of what engineers expect | Use `max(0.0, min(1.0, 0.5 - raw))`: positive raw (normal) → low score, negative raw (anomalous) → high score |
+| 22 | Training on too few log lines (e.g., 1000 instead of 500K) | IsolationForest sees too few template patterns → considers everything anomalous or everything normal | Use at least 100K–500K lines; `MAX_LINES = 500000` is the validated default |
+| 23 | Forgetting masking in `drain3.ini` | "port 8080" and "port 3000" create separate templates → template explosion → sparse, noisy feature vectors | Enable `[MASKING]` with NUM and HEX patterns to normalize variable tokens before template discovery |
+
+---
+
+## Phase 6: Storage (SQL + Feedback)
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 24 | Forgetting `session.refresh(row)` after `session.commit()` | `row.id` is `None` in the API response — the auto-generated primary key hasn't been loaded from the database | Always call `session.refresh(row)` after `commit()` to reload auto-generated fields |
+| 25 | Using `os.environ` instead of `monkeypatch` in tests for `DATABASE_URL` | Test database URL leaks into subsequent tests → tests write to production database or cross-contaminate | Use `monkeypatch.setenv("DATABASE_URL", "sqlite:///test.db")` — it auto-reverts after each test |
+| 26 | Forgetting `init_db()` before the first request | `sqlalchemy.exc.OperationalError: no such table: feedbackrow` — tables don't exist | Call `init_db()` at module import time (or in a FastAPI startup event); `CREATE TABLE IF NOT EXISTS` is idempotent |
+
+---
+
+## Phase 7: Agent Orchestration (LangGraph)
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 27 | Not wrapping `json.loads()` in try/except in `draft_node` | LLM returns invalid JSON (markdown fences, trailing text, partial output) → entire pipeline crashes with `JSONDecodeError` | Always catch `json.JSONDecodeError` and fall back to using raw text as summary |
+| 28 | Typo in `TypedDict` field name (e.g., `anomly_result` instead of `anomaly_result`) | `KeyError` at runtime — TypedDict doesn't enforce types at runtime, only provides IDE hints | Enable `mypy` strict mode; use consistent copy-paste from the `AgentState` definition; add unit tests that access each field |
+| 29 | LLM hallucinates plausible-looking `evidence_doc_ids` | Actions cite fake documents like `runbook:NodeOOM:3` that don't exist in retrieved context — dangerous in production | The `validate_node` catches this, but you MUST ensure it runs. Never skip the validation step. Test with the 6 safety edge cases |
+| 30 | Using `AgentExecutor` (LangChain) instead of `LangGraph` | LLM decides tool order — might skip anomaly scoring, call retrieval twice, or enter infinite loops | Use LangGraph `StateGraph` with explicit `add_edge()` for deterministic execution; this is a deliberate architectural choice |
+
+---
+
+## Phase 8: Auth + Admin
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 31 | Leaving `AUTH_ENABLED=false` in production | Anyone can access all endpoints including admin — zero security | Set `AUTH_ENABLED=true` in production `.env`; generate proper JWT tokens for users |
+| 32 | Using the default `JWT_SECRET` value in production | Anyone who reads the source code can forge valid admin tokens | Generate a strong random secret: `python -c "import secrets; print(secrets.token_hex(32))"` |
+| 33 | Forgetting that JWT tokens expire | `401 Unauthorized` on every request after token expiry — users think auth is broken | Implement refresh token flow, or set reasonable expiry (e.g., 24h for dev, 15min for prod with refresh) |
+| 34 | Using `Depends(get_current_user)` when you only need auth check (not user info) | Works but clutters function signature with unused parameter | Use `dependencies=[Depends(require_role("admin"))]` on the route decorator instead — auth runs but result is discarded |
+
+---
+
+## Phase 9: Streamlit UI
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 35 | Starting Streamlit before the API is running | "❌ Cannot connect to API" error on every analysis attempt | Always start the API first (`uvicorn ...`), then Streamlit. In Docker Compose, use `depends_on` |
+| 36 | Using `localhost:8000` as API URL inside Docker | Streamlit container can't reach the API — `localhost` inside a container means the container itself, not the host | Use `http://api:8000` (Docker service name) inside Docker Compose; only use `localhost` for local dev |
+| 37 | Not setting `timeout=120.0` on the httpx call | Real LLM inference takes 5-15s → httpx default timeout (5s) expires → request fails even though the API is working | Set `timeout=120.0` on `httpx.post()` to handle slow LLM responses |
+
+---
+
+## Phase 10: Evaluation + DVC
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 38 | Changing a parameter in the script but not in `params.yaml` | DVC doesn't detect the change → `dvc repro` skips the stage → you're running with old parameters | Always change parameters in `params.yaml`, never hardcode them in scripts; scripts should read from `params.yaml` |
+| 39 | Running `dvc repro` without running `dvc pull` first on a new machine | Missing data files → stages fail with "file not found" | Run `dvc pull` to download DVC-tracked data before `dvc repro`, or run `python scripts/data/download_all.py` first |
+| 40 | Gold evaluation set too small (fewer than 10 queries) | MRR and Recall@K metrics are noisy — one query changing result flips the metric by 10%+ | Start with at least 12 queries; expand organically from real failures; aim for 50+ in production |
+| 41 | Forgetting to run `dvc repro` after parameter changes | Evaluation metrics don't reflect the new parameters — you're looking at stale numbers | Always run `dvc repro` (or at least the affected stages) after changing `params.yaml` |
+
+---
+
+## Phase 11: Prefect Workflows + Drift
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 42 | Importing `prefect` without it being installed | `ModuleNotFoundError: No module named 'prefect'` crashes the import — even if you never call the function | Wrap imports in `try/except`: `try: from prefect import flow, task; except ImportError: ...` with a graceful fallback |
+| 43 | Comparing drift between training data (Hadoop logs) and production data (Kubernetes logs) | Evidently flags 60%+ drift — but it's not real drift, it's completely different data sources with zero template overlap | Verify vocabulary overlap first: if <30% of production templates exist in training vocab, retrain on representative data instead of flagging drift |
+| 44 | Installing `prefect` alongside `drain3` via Poetry | `cachetools` version conflict: drain3 pins `==4.2.1`, prefect needs `>=5.3` → `poetry install` fails | Install prefect/evidently/mlflow separately via `pip install prefect evidently mlflow` outside of Poetry's resolution scope |
+
+---
+
+## Phase 12: Tests + CI/CD
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 45 | Using `os.environ["LLM_PROVIDER"] = "mock"` in tests instead of `monkeypatch` | Env var persists across tests → if one test changes it to `"ollama"`, subsequent tests use the wrong provider | Use `monkeypatch.setenv("LLM_PROVIDER", "mock")` — auto-reverts after each test |
+| 46 | Using `pip install -e ".[dev]"` in CI with Poetry-format `pyproject.toml` | pip can't read `[tool.poetry.group.dev.dependencies]` → ruff/pytest never installed → lint/test steps fail silently or with `command not found` | Use `poetry install --no-interaction` in CI — Poetry reads its own config format correctly |
+| 47 | Not mocking `agent.invoke()` in incident analysis tests | Tests call the real agent pipeline → tries to load FAISS index, Drain3 model, etc. → fails in clean CI environment | Use `unittest.mock.patch("opspilot.agent.graph.agent.invoke", return_value=mock_response)` |
+| 48 | Not including `conftest.py` with `autouse=True` fixtures | Each test file needs its own setup boilerplate → inconsistent env vars → flaky test failures | Create `tests/conftest.py` with `@pytest.fixture(autouse=True)` that sets `LLM_PROVIDER=mock` and `AUTH_ENABLED=false` for every test |
+
+---
+
+## Phase 13: Documentation + Polish
+
+| # | ❌ Mistake | 💥 What Happens | ✅ Fix |
+|---|-----------|----------------|-------|
+| 49 | Not running `pre-commit install` after cloning | Pre-commit hooks don't fire → badly formatted code enters the repo → CI fails on formatting check | Add `pre-commit install` to `scripts/bootstrap.sh` or `make setup`; document it in README |
+| 50 | Accidentally committing large files (model weights, FAISS index, datasets) | Repository bloats from 1MB to 200MB+ → clone takes forever → GitHub may reject push | Add patterns to `.gitignore`: `models/`, `artifacts/`, `data/raw/`; use `check-added-large-files` pre-commit hook |
+| 51 | Not running `ruff format` before `ruff check` | Auto-formatter changes line lengths and indentation → previously passing lint checks now fail | Run `ruff format .` first, then `ruff check .`; or use `ruff check --fix .` to auto-fix issues |
+
+---
+
+# 🔧 TROUBLESHOOTING PLAYBOOK — Symptom → Diagnosis → Fix
+
+> When something breaks, start here. Each entry follows a consistent flow: what you see → what's actually wrong → how to fix it.
+
+---
+
+### Issue 1: `ModuleNotFoundError: No module named 'opspilot'`
+
+**Symptom:** Running `pytest` or `uvicorn opspilot.api.main:app` fails immediately.
+
+**Diagnosis:**
+```bash
+# Check 1: Is the package installed?
+pip show opspilot
+# If "WARNING: Package(s) not found" → not installed
+
+# Check 2: Is pythonpath set for pytest?
+grep "pythonpath" pyproject.toml
+# Should show: pythonpath = ["src"]
+```
+
+**Fix:**
+```bash
+# Option A: Install in editable mode
+pip install -e .
+
+# Option B: For pytest only, add to pyproject.toml:
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+```
+
+**Root cause:** Python can't find the `opspilot` package because it's in `src/opspilot/`, not at the project root. The `src/` layout requires either an editable install or explicit pythonpath.
+
+---
+
+### Issue 2: `ConnectionRefusedError` on port 8000 or 11434
+
+**Symptom:** Streamlit shows "Cannot connect to API" or agent gets `ConnectionRefused` calling Ollama.
+
+**Diagnosis:**
+```bash
+# Check if API is running:
+curl http://localhost:8000/health
+
+# Check if Ollama is running (only needed for LLM_PROVIDER=ollama):
+curl http://localhost:11434/api/tags
+```
+
+**Fix:**
+```bash
+# Start API:
+uvicorn opspilot.api.main:app --reload --port 8000
+
+# Start Ollama (only if using real LLM):
+ollama serve
+ollama pull llama3.2:3b-instruct-q4_K_M
+
+# In Docker: check service names
+docker compose ps   # Are api/ollama containers running?
+```
+
+**Root cause:** Services not started, or using `localhost` inside Docker (should use service names like `api:8000` or `ollama:11434`).
+
+---
+
+### Issue 3: FAISS returns completely irrelevant results
+
+**Symptom:** Searching for "NodeDiskRunningFull" returns results about CPUThrottling or unrelated topics.
+
+**Diagnosis:**
+```python
+# Check 1: Are embeddings correct?
+from opspilot.embeddings.encoder import encode
+vec = encode(["NodeDiskRunningFull"])
+print(vec.shape)       # Should be (1, 384)
+print(vec[0][:5])      # Should be non-zero floats
+
+# Check 2: Index-metadata alignment
+import json
+with open("artifacts/vector_index/meta.jsonl") as f:
+    lines = f.readlines()
+print(f"Metadata entries: {len(lines)}")
+# Compare with FAISS index size
+```
+
+**Fix:**
+```bash
+# Rebuild index from scratch:
+python scripts/rag/build_index.py
+
+# Clear cached retriever:
+curl -X POST http://localhost:8000/admin/clear-cache
+
+# Or restart the API server
+```
+
+**Root cause:** FAISS index and `meta.jsonl` were built in different orders, or the index is stale after runbooks were updated. Always rebuild both together and clear the LRU cache.
+
+---
+
+### Issue 4: Anomaly score is always ~0.5 (borderline)
+
+**Symptom:** Every input gets an anomaly score around 0.5, whether logs are normal or clearly anomalous.
+
+**Diagnosis:**
+```python
+# Check 1: Is the model loaded?
+from opspilot.anomaly.infer import score_logs
+result = score_logs(["ERROR disk full on /dev/sda1"] * 100)
+print(result["score"])           # Should be >> 0.5 for error-heavy logs
+print(result["details"]["raw_isolation_score"])  # Should be negative
+
+# Check 2: Is vocab matching?
+import json
+with open("artifacts/anomaly_vocab.json") as f:
+    vocab = json.load(f)
+print(f"Vocab size: {len(vocab)}")  # Should be ~300
+```
+
+**Fix:**
+```bash
+# Retrain with sufficient data:
+python scripts/features/parse_logs.py      # Re-parse logs
+python scripts/features/build_features.py  # Re-build feature vectors
+python scripts/train/train_anomaly.py      # Re-train model
+```
+
+**Root cause:** Usually one of: (1) model trained on too few samples, (2) vocab mismatch between training and inference, (3) online featurizer templates don't match training templates because `drain3.ini` differs.
+
+---
+
+### Issue 5: LLM returns invalid JSON
+
+**Symptom:** `draft_node` crashes with `json.JSONDecodeError`, or the response has raw markdown instead of structured data.
+
+**Diagnosis:**
+```python
+# Check the raw LLM output:
+from opspilot.agent.tools import call_llm
+raw = call_llm("Return a JSON object with key 'test'")
+print(repr(raw))
+# Look for: markdown fences (```json), trailing text, incomplete JSON
+```
+
+**Fix:**
+```python
+# The code should already handle this — verify draft_node has:
+try:
+    parsed = json.loads(raw)
+except json.JSONDecodeError:
+    parsed = {"summary": raw, "actions": [], ...}  # Fallback
+```
+
+**Root cause:** LLMs frequently wrap JSON in markdown fences, add explanatory text, or truncate output. Strip markdown fences (`raw.strip("` ").removeprefix("json")`) before parsing. The mock provider never has this issue — it returns clean JSON.
+
+---
+
+### Issue 6: `poetry install` fails with cachetools conflict
+
+**Symptom:** `Because drain3 (0.9.11) depends on cachetools (==4.2.1) and prefect (>=2.20.1) depends on cachetools (>=5.3), they are incompatible.`
+
+**Diagnosis:** This is an **irreconcilable conflict**. No version of cachetools satisfies both requirements. Poetry's SAT solver correctly refuses.
+
+**Fix:**
+```bash
+# Remove prefect/evidently/mlflow from pyproject.toml entirely
+# They are NOT in [tool.poetry.dependencies]
+# Install them separately when needed:
+pip install prefect evidently mlflow
+```
+
+**Root cause:** Poetry resolves ALL groups — even optional ones marked `--without` — before generating the lockfile. The `--without` flag only controls installation, not resolution. Complete removal from the lockfile scope is the only fix.
+
+---
+
+### Issue 7: Docker build fails on `COPY models/`
+
+**Symptom:** `COPY failed: file not found in build context or excluded by .dockerignore`
+
+**Diagnosis:**
+```bash
+ls -la models/    # Probably doesn't exist — it's gitignored
+cat .gitignore    # Confirms: models/ is excluded
+```
+
+**Fix:**
+```dockerfile
+# Replace COPY models/ with:
+RUN mkdir -p /app/models /app/artifacts
+# Populate at runtime via DVC pull or volume mounts
+```
+
+**Root cause:** `models/` and `artifacts/` are gitignored (DVC-tracked). They don't exist in the git repo. Docker's `COPY` command fails on missing directories. Create empty dirs and populate them at runtime.
+
+---
+
+### Issue 8: CI lint fails with E501 / unused imports
+
+**Symptom:** GitHub Actions CI fails on `ruff check` with errors like `E501 Line too long` or `F401 imported but unused`.
+
+**Fix:**
+```bash
+# Auto-fix most issues:
+ruff check src/ tests/ scripts/ --fix
+
+# Format code:
+ruff format src/ tests/ scripts/
+
+# Then commit and push
+```
+
+**Root cause:** Pre-commit hooks weren't installed (or weren't run). Always run `pre-commit install` after cloning.
+
+---
+
+### Issue 9: `pytest` runs but finds 0 tests
+
+**Symptom:** `pytest tests/ -v` reports "no tests ran" or "collected 0 items".
+
+**Diagnosis:**
+```bash
+# Check 1: Test files exist and follow naming convention
+ls tests/test_*.py
+
+# Check 2: Test functions start with test_
+grep "def test_" tests/test_api_contract.py
+
+# Check 3: pythonpath is set
+grep "pythonpath" pyproject.toml
+```
+
+**Fix:** Ensure test files are named `test_*.py`, test functions start with `test_`, and `pythonpath = ["src"]` is in `[tool.pytest.ini_options]`.
+
+---
+
+### Issue 10: BM25 `ZeroDivisionError`
+
+**Symptom:** `ZeroDivisionError` in `rank_bm25` during retrieval.
+
+**Root cause:** BM25 was initialized with an empty corpus (no documents indexed).
+
+**Fix:**
+```python
+# In bm25.py, add early return:
+def search(self, query: str, top_k: int = 6):
+    if not self.corpus:    # <-- Guard against empty corpus
+        return []
+    scores = self.bm25.get_scores(query.split())
+    ...
+```
+
+---
+
+### Issue 11: Streamlit shows "Cannot connect to API"
+
+**Symptom:** Clicking "Analyze Incident" shows the red error banner.
+
+**Fix checklist:**
+1. Is the API running? → `curl http://localhost:8000/health`
+2. Is the URL correct? → Check `API_URL` env var in Streamlit
+3. In Docker? → Use `http://api:8000`, not `http://localhost:8000`
+4. Firewall blocking? → Check port 8000 is accessible
+
+---
+
+### Issue 12: `dvc repro` skips a stage you expected to run
+
+**Symptom:** You changed parameters but `dvc repro` says "Stage 'train' didn't change, skipping."
+
+**Diagnosis:**
+```bash
+dvc status       # Shows which stages have changed deps/params
+dvc params diff  # Shows parameter changes
+```
+
+**Fix:**
+```bash
+# Option A: Force re-run
+dvc repro --force train
+
+# Option B: Ensure change is in params.yaml (not hardcoded in script)
+# DVC only tracks params declared in dvc.yaml's params: section
+```
+
+**Root cause:** DVC tracks files in `deps:` and values in `params:`. If you changed a value that isn't declared in the stage's `params:` section, DVC doesn't see it.
+
+---
+
+### Issue 13: JWT `401 Unauthorized` on every request
+
+**Symptom:** All API calls return 401, even with a token.
+
+**Diagnosis:**
+```bash
+# Check 1: Is auth enabled?
+echo $AUTH_ENABLED   # "true" or "false"?
+
+# Check 2: Is the token valid?
+python -c "import jwt; print(jwt.decode('YOUR_TOKEN', 'YOUR_SECRET', algorithms=['HS256']))"
+
+# Check 3: Is the token expired?
+# Look at the 'exp' claim in the decoded payload
+```
+
+**Fix:**
+```bash
+# For development — just disable auth:
+export AUTH_ENABLED=false
+
+# For production — generate a fresh token:
+python -c "
+import jwt, time
+token = jwt.encode({'sub': 'admin', 'role': 'admin', 'exp': time.time() + 86400}, 'YOUR_JWT_SECRET', algorithm='HS256')
+print(token)
+"
+```
+
+---
+
+# 📋 FIRST-TIME SETUP PITFALLS CHECKLIST
+
+> Run through this checklist after a fresh `git clone`. Each item has the common mistake that catches first-timers.
+
+---
+
+```
+□  1. Python version is 3.11+
+      Common mistake: Running Python 3.9/3.10 → syntax errors on type unions (X | Y)
+      Check: python --version
+
+□  2. Poetry is installed
+      Common mistake: Using pip install with Poetry-format pyproject.toml → deps not installed
+      Check: poetry --version
+      Fix:   pip install poetry
+
+□  3. Dependencies installed via Poetry (not pip)
+      Common mistake: pip install -e . → misses [tool.poetry.group.dev.dependencies]
+      Check: poetry install --no-interaction
+      
+□  4. .env file created from .env.example
+      Common mistake: Running without .env → uses hardcoded defaults → may cause confusion
+      Fix:   cp .env.example .env
+
+□  5. LLM_PROVIDER is set to "mock"
+      Common mistake: Default is already mock, but if .env has "ollama" → needs Ollama running
+      Check: grep LLM_PROVIDER .env
+
+□  6. Data downloaded (either bootstrap or manual)
+      Common mistake: Running dvc repro before data exists → "file not found" errors
+      Fix:   bash scripts/bootstrap.sh   (does everything)
+      Alt:   python scripts/data/download_all.py
+
+□  7. Pre-commit hooks installed
+      Common mistake: Committing badly formatted code → CI fails on push
+      Fix:   pre-commit install
+
+□  8. All imports verify clean
+      Common mistake: Missing dependency → crash at import time
+      Fix:   python scripts/verify_imports.py
+
+□  9. pytest runs and passes
+      Common mistake: Missing pythonpath or conftest → 0 tests collected
+      Check: pytest tests/ -v --tb=short
+      
+□ 10. API starts successfully
+      Common mistake: Port already in use → cryptic "Address already in use" error
+      Check: uvicorn opspilot.api.main:app --port 8000
+      Fix:   lsof -i :8000  (find and kill existing process)
+
+□ 11. Health check responds
+      Common mistake: API started but routes not registered → 404 on /health
+      Check: curl http://localhost:8000/health
+      
+□ 12. FAISS index exists (if running RAG features)
+      Common mistake: Calling /rag/search without building index → empty results or crash
+      Fix:   make index   (or python scripts/rag/build_index.py)
+
+□ 13. Anomaly model exists (if running anomaly features)  
+      Common mistake: Calling /anomaly/score without training → model load error
+      Fix:   make train   (or run bootstrap.sh which includes this)
+```
+
+---
+
+# ⚡ MISTAKES-TO-AVOID QUICK REFERENCE
+
+> Compact lookup table: "If you see X, it's probably because of Y, fix with Z."
+
+---
+
+| # | If You See... | It's Probably Because... | Fix With... |
+|---|---------------|--------------------------|-------------|
+| 1 | `ModuleNotFoundError: opspilot` | Package not installed or `pythonpath` missing | `pip install -e .` or add `pythonpath = ["src"]` to pytest config |
+| 2 | `ConnectionRefusedError` | API or Ollama not running | Start the service: `uvicorn ...` or `ollama serve` |
+| 3 | FAISS returns wrong documents | Index and metadata built in different order, or stale cache | Rebuild index + `POST /admin/clear-cache` |
+| 4 | Anomaly score always 0.5 | Vocab mismatch or model not trained properly | Retrain: `make features && make train` |
+| 5 | `JSONDecodeError` in draft_node | LLM returned text/markdown instead of JSON | Ensure `try/except` fallback exists in `draft_node` |
+| 6 | `cachetools` version conflict | drain3 and prefect can't coexist in Poetry | Remove prefect from pyproject.toml; install via pip separately |
+| 7 | Docker `COPY` file not found | `models/` or `artifacts/` are gitignored | Use `RUN mkdir -p` instead of `COPY` |
+| 8 | CI lint failures | Pre-commit hooks not installed locally | `ruff check --fix . && ruff format .` |
+| 9 | 0 tests collected | Test files/functions badly named or pythonpath missing | Name files `test_*.py`, functions `test_*`, add pythonpath |
+| 10 | `ZeroDivisionError` in BM25 | Empty corpus (index not built) | Build index first; add `if not self.corpus: return []` guard |
+| 11 | Streamlit can't reach API | Wrong URL (localhost vs Docker service name) | Use `http://api:8000` in Docker, `http://localhost:8000` locally |
+| 12 | `dvc repro` skips changed stage | Parameter changed in script, not in `params.yaml` | Always change params in `params.yaml`, not in scripts |
+| 13 | 401 on every request | JWT expired, wrong secret, or auth enabled without tokens | `AUTH_ENABLED=false` for dev, or generate fresh token |
+| 14 | Mutable default bug (`default=[]`) | Multiple Pydantic instances share same list | Use `Field(default_factory=list)` |
+| 15 | Tests leak env vars | `os.environ` used instead of `monkeypatch` | Use `monkeypatch.setenv()` — auto-reverts after each test |
+| 16 | Pre-commit blocks commit | Code has lint/format issues | `ruff check --fix . && ruff format .` then re-commit |
+| 17 | Large file committed to git | `.gitignore` missing pattern for data/models/artifacts | Add to `.gitignore`; use `git rm --cached` to un-track |
+| 18 | `poetry install` takes forever | Complex dependency tree with pip fallback | Use `poetry install` (not pip); ensure lockfile is fresh with `poetry lock` |
+| 19 | MLflow UI not accessible | MLflow server not started or wrong port | `mlflow ui --port 5000` or use Docker Compose |
+| 20 | Drift detector flags everything | Training and production data are from completely different sources | Check vocabulary overlap first; retrain on representative data |
+
+---
+
+> **💡 Pro tip:** Bookmark this section. When something breaks, Ctrl+F for the error message — chances are it's one of these 20 issues.
