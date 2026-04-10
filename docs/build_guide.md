@@ -11980,6 +11980,3436 @@ MODEL REGISTRY — Lifecycle Management:
 
 ---
 
+# 📦 DATA VERSIONING (DVC) — DEEP DIVE
+
+> **What:** DVC (Data Version Control) is an open-source tool that version-controls
+> data files, ML models, and entire ML pipelines — the same way Git version-controls code.
+>
+> **Why:** Git is designed for small text files (code). It chokes on large binary artifacts
+> like training datasets (hundreds of MB), model weights (GB+), and feature stores.
+> DVC solves this by storing pointers (`.dvc` files) in Git while the actual data lives in
+> configurable remote storage (S3, GCS, Azure Blob, NFS, SSH, HDFS).
+>
+> **Where:** Anywhere you have ML training data, model artifacts, or evaluation datasets
+> that need to be reproducible and shared across a team.
+>
+> **When:** From the moment you have your first dataset. Retrofitting DVC into a mature
+> project is painful — start early.
+>
+> **How:** DVC wraps Git workflows with data-aware commands. You `dvc add` a file
+> (analogous to `git add`), commit the `.dvc` pointer to Git, and `dvc push` the actual
+> data to remote storage. Team members `dvc pull` to get the exact data version.
+
+---
+
+## The Problem DVC Solves
+
+```
+WITHOUT DVC — The Data Chaos Problem:
+
+  Developer A:
+    training_data_v2_final.csv          ← 2.3 GB, stored somewhere...
+    training_data_v2_final_REAL.csv     ← Wait, which one is correct?
+    training_data_v3_maybe.csv          ← Nobody remembers what changed
+
+  Developer B:
+    "I retrained the model and got better results"
+    "What data did you use?"
+    "Uh... the latest one from the shared drive?"
+    "Which version?"
+    "..."
+
+  PROBLEMS:
+    1. No version history for data (Git can't handle 2 GB files)
+    2. No reproducibility (which data + which code = which model?)
+    3. No collaboration (how do you share 10 GB of data?)
+    4. No audit trail (who changed the data and when?)
+
+WITH DVC — Version-Controlled Data:
+
+  Git Repository (small, fast):
+    training_data.csv.dvc              ← 75 bytes pointer file
+    model.pkl.dvc                      ← 75 bytes pointer file
+    dvc.yaml                           ← Pipeline definition
+    dvc.lock                           ← Exact pipeline state (hashes)
+
+  Remote Storage (S3, GCS, etc.):
+    .dvc/cache/ab/cdef1234...          ← Actual 2.3 GB data file
+    .dvc/cache/78/9abc5678...          ← Actual model file
+
+  NOW:
+    git log -- training_data.csv.dvc    ← Full version history
+    git checkout v1.2 && dvc checkout   ← Reproduce exact data state
+    dvc push / dvc pull                 ← Share data with team
+    dvc diff                            ← See what changed in data
+```
+
+---
+
+## How DVC Works Internally
+
+```
+DVC ARCHITECTURE — Content-Addressable Storage:
+
+  ┌─────────────────────────────────────────────────────┐
+  │                    GIT REPOSITORY                    │
+  │                                                     │
+  │  training_data.csv.dvc:                             │
+  │  ┌─────────────────────────────────────────────┐    │
+  │  │ outs:                                       │    │
+  │  │   - md5: ab12cd34ef56ab12cd34ef56ab12cd34   │    │
+  │  │     size: 2415919104                        │    │
+  │  │     path: training_data.csv                 │    │
+  │  │     hash: md5                               │    │
+  │  └────────────────────────┬────────────────────┘    │
+  │                           │                         │
+  │  .gitignore:              │  ← DVC auto-adds large  │
+  │  /training_data.csv       │    files to .gitignore  │
+  └───────────────────────────┼─────────────────────────┘
+                              │
+                              │ md5 hash = pointer
+                              │
+  ┌───────────────────────────▼─────────────────────────┐
+  │               LOCAL DVC CACHE                        │
+  │  .dvc/cache/                                        │
+  │  └── ab/                                            │
+  │      └── 12cd34ef56ab12cd34ef56ab12cd34             │
+  │          ← Actual file content (2.3 GB)             │
+  │          ← Stored by content hash (deduplication!)  │
+  └───────────────────────────┬─────────────────────────┘
+                              │
+                              │ dvc push / dvc pull
+                              │
+  ┌───────────────────────────▼─────────────────────────┐
+  │              REMOTE STORAGE                          │
+  │  s3://my-bucket/dvc-store/                          │
+  │  └── ab/                                            │
+  │      └── 12cd34ef56ab12cd34ef56ab12cd34             │
+  │          ← Same content, shared across team         │
+  └─────────────────────────────────────────────────────┘
+
+KEY INSIGHT — Content-Addressable Storage:
+  - Files are stored by their HASH, not their name
+  - If two files have the same content → stored only ONCE (deduplication)
+  - If you change 1 byte → completely different hash → stored separately
+  - This is the same idea behind Git's object store, Docker layers, and IPFS
+```
+
+---
+
+## DVC Commands — The Complete Workflow
+
+```bash
+# ============================================================
+# STEP 1: Initialize DVC in your Git repository
+# ============================================================
+cd /path/to/opspilot
+dvc init
+# Creates:
+#   .dvc/            ← DVC internal directory (like .git/)
+#   .dvc/config      ← DVC configuration file
+#   .dvc/.gitignore  ← Prevents caching artifacts from entering Git
+#   .dvcignore       ← Like .gitignore but for DVC
+
+git add .dvc .dvcignore
+git commit -m "Initialize DVC"
+
+# ============================================================
+# STEP 2: Configure remote storage
+# ============================================================
+# Option A: Amazon S3
+dvc remote add -d myremote s3://my-bucket/dvc-store
+# -d means "default" — this is where dvc push/pull goes by default
+
+# Option B: Google Cloud Storage
+dvc remote add -d myremote gs://my-bucket/dvc-store
+
+# Option C: Local/NFS (for on-prem teams)
+dvc remote add -d myremote /mnt/shared/dvc-store
+
+# Option D: SSH server
+dvc remote add -d myremote ssh://user@server:/path/to/dvc-store
+
+# Save remote config to Git (so team members get it automatically):
+git add .dvc/config
+git commit -m "Configure DVC remote storage"
+
+# ============================================================
+# STEP 3: Track a large file
+# ============================================================
+dvc add data/training_data.csv
+# This does THREE things:
+#   1. Computes MD5 hash of the file
+#   2. Copies the file to .dvc/cache/ (by hash)
+#   3. Creates data/training_data.csv.dvc (the pointer file)
+#   4. Adds data/training_data.csv to data/.gitignore
+
+# Now commit the pointer (small) to Git:
+git add data/training_data.csv.dvc data/.gitignore
+git commit -m "Track training data v1"
+
+# ============================================================
+# STEP 4: Push data to remote storage
+# ============================================================
+dvc push
+# Uploads cached files to the configured remote
+# Only uploads files not already present (content-addressable = dedup)
+
+# ============================================================
+# STEP 5: Team member pulls data
+# ============================================================
+git clone https://github.com/team/opspilot.git
+cd opspilot
+dvc pull
+# Downloads the exact data files referenced by .dvc pointer files
+# Result: exact same training_data.csv on every machine
+
+# ============================================================
+# STEP 6: Update data and version it
+# ============================================================
+# Modify the data file (add new training examples, clean data, etc.)
+python scripts/add_new_training_data.py
+
+dvc add data/training_data.csv
+# New hash computed, new cache entry created
+
+git add data/training_data.csv.dvc
+git commit -m "Training data v2: added 500 new samples, removed duplicates"
+dvc push
+
+# ============================================================
+# STEP 7: Go back to a previous data version
+# ============================================================
+git log -- data/training_data.csv.dvc    # See version history
+git checkout abc123 -- data/training_data.csv.dvc  # Checkout old pointer
+dvc checkout                              # Restore the actual data file
+# You now have the EXACT data from commit abc123
+
+# ============================================================
+# STEP 8: Compare data versions
+# ============================================================
+dvc diff HEAD~1
+# Shows which tracked files changed, with size differences
+# Example output:
+#   Modified: data/training_data.csv
+#     Old size: 2.1 GB
+#     New size: 2.3 GB
+```
+
+---
+
+## DVC Pipelines — Reproducible ML Workflows
+
+```yaml
+# dvc.yaml — Define your entire ML pipeline as a DAG (Directed Acyclic Graph)
+#
+# WHY PIPELINES?
+#   - Reproducibility: Anyone can re-run the exact same pipeline
+#   - Caching: DVC skips stages whose inputs haven't changed
+#   - Dependency tracking: If data changes, retrain. If only code changes, re-evaluate.
+#   - Documentation: The pipeline IS the documentation
+
+stages:
+  prepare:
+    cmd: python src/prepare_data.py
+    deps:                           # Input dependencies
+      - src/prepare_data.py         # If this script changes → re-run
+      - data/raw/metrics.csv        # If raw data changes → re-run
+    params:                         # Hyperparameters (from params.yaml)
+      - prepare.split_ratio
+      - prepare.seed
+    outs:                           # Output files (tracked by DVC)
+      - data/prepared/train.csv
+      - data/prepared/test.csv
+
+  featurize:
+    cmd: python src/featurize.py
+    deps:
+      - src/featurize.py
+      - data/prepared/train.csv     # ← Depends on output of 'prepare' stage
+      - data/prepared/test.csv
+    params:
+      - featurize.window_size
+      - featurize.features
+    outs:
+      - data/features/train_features.pkl
+      - data/features/test_features.pkl
+
+  train:
+    cmd: python src/train.py
+    deps:
+      - src/train.py
+      - data/features/train_features.pkl  # ← Depends on 'featurize' output
+    params:
+      - train.n_estimators
+      - train.contamination
+      - train.max_samples
+    outs:
+      - models/anomaly_model.pkl
+    metrics:                        # ML metrics (tracked separately)
+      - metrics/train_metrics.json:
+          cache: false              # Always show in dvc metrics, don't cache
+
+  evaluate:
+    cmd: python src/evaluate.py
+    deps:
+      - src/evaluate.py
+      - models/anomaly_model.pkl
+      - data/features/test_features.pkl
+    metrics:
+      - metrics/eval_metrics.json:
+          cache: false
+    plots:                          # Visualization outputs
+      - plots/confusion_matrix.csv:
+          cache: false
+          x: predicted
+          y: actual
+```
+
+```
+DVC PIPELINE DAG — What DVC Builds from the YAML:
+
+  ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │ prepare  │────►│featurize │────►│  train   │────►│ evaluate │
+  │          │     │          │     │          │     │          │
+  │ raw data │     │ features │     │  model   │     │ metrics  │
+  │ → splits │     │ engineer │     │ training │     │ + plots  │
+  └──────────┘     └──────────┘     └──────────┘     └──────────┘
+
+  Running the pipeline:
+    dvc repro                    ← Runs ALL stages (skips cached ones)
+    dvc repro train              ← Runs up to and including 'train'
+    dvc repro --force train      ← Forces re-run even if cached
+
+  DVC checks each stage:
+    "Have any deps, params, or code changed since last run?"
+    YES → re-run this stage and all downstream stages
+    NO  → skip (use cached output)
+
+  This is MASSIVELY time-saving:
+    - Changed a hyperparameter? Only retrain + evaluate (skip prepare + featurize)
+    - Changed featurization code? Retrain + evaluate (skip prepare)
+    - Changed nothing? Skip everything (instant)
+```
+
+```bash
+# Pipeline commands:
+dvc repro                      # Reproduce the entire pipeline
+dvc repro --dry                # See what WOULD run (without running)
+dvc dag                        # Visualize the pipeline DAG
+dvc params diff                # Compare parameters across versions
+dvc metrics show               # Show current metrics
+dvc metrics diff               # Compare metrics across versions
+
+# Example output of dvc metrics diff:
+#   Path                    Metric      HEAD    workspace
+#   metrics/eval_metrics    precision   0.92    0.95      ← Improved!
+#   metrics/eval_metrics    recall      0.88    0.87      ← Slightly worse
+#   metrics/eval_metrics    f1_score    0.90    0.91      ← Net improvement
+```
+
+---
+
+## DVC + Git Integration — The Full Picture
+
+```
+THE RELATIONSHIP BETWEEN GIT AND DVC:
+
+  Git manages:                    DVC manages:
+  ┌─────────────────────┐        ┌─────────────────────┐
+  │ • Source code (.py)  │        │ • Training data     │
+  │ • Config files       │        │ • Model artifacts   │
+  │ • DVC pointer files  │───────►│ • Feature stores    │
+  │   (.dvc, dvc.yaml,   │        │ • Evaluation data   │
+  │    dvc.lock)         │        │ • Large binaries    │
+  │ • params.yaml        │        │                     │
+  │ • README, docs       │        │ Stored in:          │
+  │                      │        │ S3, GCS, NFS, etc.  │
+  └─────────────────────┘        └─────────────────────┘
+
+  EVERY GIT COMMIT = A SNAPSHOT OF:
+    Code (in Git) + Data (pointer in Git, content in DVC remote)
+    
+  This means:
+    git checkout v1.0 && dvc checkout   ← Exact code + exact data from v1.0
+    git checkout v2.0 && dvc checkout   ← Exact code + exact data from v2.0
+    
+  FULL REPRODUCIBILITY:
+    Any commit → exact code + exact data + exact params → exact model
+```
+
+---
+
+## Common Mistakes with DVC
+
+```
+MISTAKE 1: Forgetting to dvc push after dvc add
+  SYMPTOM:  Your .dvc file is in Git, but nobody else can dvc pull the data
+  FIX:      Always run: dvc add → git add → git commit → dvc push
+
+MISTAKE 2: Adding large files to Git directly
+  SYMPTOM:  Git repository becomes huge, slow to clone
+  FIX:      Use dvc add for ANY file > 10 MB
+  RECOVERY: git filter-branch or BFG Repo-Cleaner to remove from history
+
+MISTAKE 3: Not committing dvc.lock
+  SYMPTOM:  dvc repro can't determine what changed
+  FIX:      Always commit both dvc.yaml AND dvc.lock
+
+MISTAKE 4: Modifying tracked files without dvc add
+  SYMPTOM:  dvc status shows "changed" but data isn't versioned
+  FIX:      After modifying a tracked file, run dvc add again
+
+MISTAKE 5: Storing credentials in .dvc/config
+  SYMPTOM:  AWS keys in your Git history
+  FIX:      Use dvc remote modify --local to store credentials outside Git
+            Or use environment variables / IAM roles
+```
+
+---
+
+### Interview Q: "How do you version control training data?"
+
+> **Answer:** "We use DVC (Data Version Control) alongside Git. Git tracks code and small config files, while DVC tracks large data files and model artifacts. DVC stores lightweight pointer files (`.dvc` files containing MD5 hashes) in Git, while the actual data lives in remote storage like S3. This gives us: (1) Full version history for data — we can see exactly which dataset was used for any model version. (2) Reproducibility — checking out any Git commit and running `dvc checkout` gives us the exact code + exact data from that point in time. (3) Collaboration — team members `dvc pull` to get the data they need without bloating the Git repo. (4) Pipeline caching — DVC pipelines (`dvc.yaml`) define the full ML workflow as a DAG, and DVC skips stages whose inputs haven't changed, massively reducing retrain time. The key insight is that DVC uses content-addressable storage (like Git's object store), so identical files are never stored twice."
+
+### Interview Q: "How would you ensure ML experiment reproducibility?"
+
+> **Answer:** "Reproducibility requires pinning four things: code, data, parameters, and environment. We use Git for code, DVC for data and model artifacts (every Git commit points to exact data version via `.dvc` pointer files), `params.yaml` tracked by DVC for hyperparameters, and `dvc.lock` records the exact hash of every input and output at each pipeline stage. Combined with MLflow for tracking metrics and a Docker container pinning the exact Python environment, any experiment can be reproduced months later by checking out the Git commit and running `dvc repro`."
+
+---
+
+# 📉 MODEL DRIFT DETECTION — DEEP DIVE
+
+> **What:** Model drift is the degradation of a deployed ML model's performance over time
+> because the real-world data it encounters diverges from the training data distribution.
+>
+> **Why:** A model trained on January data may perform poorly by June if user behavior,
+> system configurations, or environmental conditions change. Without drift detection,
+> you're serving predictions from a stale model — silently losing accuracy.
+>
+> **Where:** In every production ML system. Drift monitoring sits between the model
+> serving layer and the alerting/retraining pipeline.
+>
+> **When:** Continuously — drift detection runs on every prediction batch or on a
+> scheduled cadence (hourly, daily) comparing recent predictions to baseline distributions.
+>
+> **How:** Statistical tests compare distributions of input features, model outputs, or
+> ground-truth labels between a reference window (training data) and a serving window
+> (recent production data). If the divergence exceeds a threshold → alert → retrain.
+
+---
+
+## Types of Drift — The Three Categories
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    THREE TYPES OF DRIFT                        │
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│  1. DATA DRIFT (Covariate Shift)                               │
+│     The INPUT feature distributions change.                    │
+│     The relationship between features and target stays same.   │
+│                                                                │
+│     Example:                                                   │
+│       Training: CPU usage 20-60% (normal office hours)         │
+│       Production: CPU usage 70-95% (new workload deployed)     │
+│       Impact: Model sees inputs it was never trained on        │
+│                                                                │
+│     Detection: Compare P(X_train) vs P(X_production)           │
+│     Tests: KS-test, PSI, Chi-squared                           │
+│                                                                │
+│  2. CONCEPT DRIFT                                              │
+│     The RELATIONSHIP between features and target changes.      │
+│     Features may look the same but labels shift.               │
+│                                                                │
+│     Example:                                                   │
+│       Before: High CPU + high memory = anomaly                 │
+│       After:  High CPU + high memory = new normal (bigger VMs) │
+│       Impact: Correct inputs → wrong predictions               │
+│                                                                │
+│     Detection: Monitor prediction accuracy over time           │
+│     Tests: DDM, ADWIN, Page-Hinkley test                       │
+│                                                                │
+│  3. PREDICTION DRIFT (Label Drift)                             │
+│     The OUTPUT distribution of predictions changes.            │
+│     Model starts predicting differently even if inputs similar.│
+│                                                                │
+│     Example:                                                   │
+│       Training: 5% of predictions are "anomaly"                │
+│       Production: 25% of predictions are "anomaly"             │
+│       Impact: Too many false alarms OR missed anomalies        │
+│                                                                │
+│     Detection: Compare P(Y_train) vs P(Y_production)           │
+│     Tests: KS-test, PSI on prediction scores                   │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+
+SUBTYPES OF CONCEPT DRIFT:
+
+  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+  │ Sudden   │  │ Gradual  │  │Incremental│  │Recurring │
+  │          │  │          │  │          │  │          │
+  │  ──┐     │  │  ──╲     │  │  ──╲     │  │  ──╲ ╱── │
+  │    │──   │  │    ╲──   │  │     ╲──  │  │    ╲╱    │
+  │          │  │          │  │          │  │          │
+  │ Instant  │  │ Mix of   │  │ Slow,    │  │ Seasonal │
+  │ change   │  │ old+new  │  │ steady   │  │ patterns │
+  └──────────┘  └──────────┘  └──────────┘  └──────────┘
+
+  Sudden:      System upgrade changes everything overnight
+  Gradual:     User behavior slowly shifts over months
+  Incremental: Very slow, continuous evolution
+  Recurring:   Seasonal patterns (Black Friday, weekends)
+```
+
+---
+
+## Statistical Tests for Drift Detection
+
+```python
+# ================================================================
+# METHOD 1: Kolmogorov-Smirnov (KS) Test
+# ================================================================
+# WHAT: Non-parametric test comparing two distributions
+# HOW:  Measures the maximum distance between cumulative distributions
+# WHEN: Best for continuous numerical features
+# THRESHOLD: p-value < 0.05 means distributions are different
+
+from scipy import stats
+import numpy as np
+
+def detect_drift_ks(
+    reference_data: np.ndarray,    # Training data distribution
+    production_data: np.ndarray,   # Recent production data
+    significance_level: float = 0.05,
+) -> dict:
+    """
+    Kolmogorov-Smirnov test for data drift.
+    
+    The KS statistic measures the MAXIMUM vertical distance between
+    the cumulative distribution functions (CDFs) of two samples.
+    
+    KS_statistic = max|F_reference(x) - F_production(x)|
+    
+    Small p-value → distributions are DIFFERENT → drift detected
+    Large p-value → distributions are SIMILAR → no drift
+    """
+    statistic, p_value = stats.ks_2samp(reference_data, production_data)
+    
+    drift_detected = p_value < significance_level
+    
+    return {
+        "test": "Kolmogorov-Smirnov",
+        "statistic": statistic,
+        "p_value": p_value,
+        "drift_detected": drift_detected,
+        "interpretation": (
+            f"Max CDF distance = {statistic:.4f}. "
+            f"{'DRIFT DETECTED' if drift_detected else 'No drift'}. "
+            f"p-value = {p_value:.6f} "
+            f"({'<' if drift_detected else '>'} {significance_level})"
+        ),
+    }
+
+
+# ================================================================
+# METHOD 2: Population Stability Index (PSI)
+# ================================================================
+# WHAT: Measures how much a distribution has shifted
+# HOW:  Compares binned proportions between reference and production
+# WHEN: Industry standard for credit scoring, widely used in ML
+# THRESHOLDS:
+#   PSI < 0.1  → No significant shift
+#   PSI 0.1-0.25 → Moderate shift (investigate)
+#   PSI > 0.25 → Significant shift (retrain!)
+
+def calculate_psi(
+    reference: np.ndarray,
+    production: np.ndarray,
+    n_bins: int = 10,
+) -> dict:
+    """
+    Population Stability Index (PSI).
+    
+    PSI = Σ (P_i - Q_i) × ln(P_i / Q_i)
+    
+    Where:
+      P_i = proportion of reference data in bin i
+      Q_i = proportion of production data in bin i
+    
+    PSI is essentially a symmetric version of KL divergence.
+    """
+    # Create bins from reference distribution
+    bins = np.percentile(reference, np.linspace(0, 100, n_bins + 1))
+    bins[0] = -np.inf
+    bins[-1] = np.inf
+    
+    # Count proportions in each bin
+    ref_counts = np.histogram(reference, bins=bins)[0]
+    prod_counts = np.histogram(production, bins=bins)[0]
+    
+    # Convert to proportions (add small epsilon to avoid division by zero)
+    epsilon = 1e-6
+    ref_props = (ref_counts / len(reference)) + epsilon
+    prod_props = (prod_counts / len(production)) + epsilon
+    
+    # Calculate PSI
+    psi = np.sum((prod_props - ref_props) * np.log(prod_props / ref_props))
+    
+    if psi < 0.1:
+        severity = "NO_SHIFT"
+        action = "No action needed"
+    elif psi < 0.25:
+        severity = "MODERATE_SHIFT"
+        action = "Investigate — possible drift"
+    else:
+        severity = "SIGNIFICANT_SHIFT"
+        action = "RETRAIN MODEL — significant drift detected"
+    
+    return {
+        "test": "Population Stability Index",
+        "psi": psi,
+        "severity": severity,
+        "action": action,
+    }
+
+
+# ================================================================
+# METHOD 3: Jensen-Shannon Divergence
+# ================================================================
+# WHAT: Symmetric version of KL divergence (always finite, bounded [0, 1])
+# HOW:  JSD(P||Q) = 0.5 * KL(P||M) + 0.5 * KL(Q||M) where M = 0.5*(P+Q)
+# WHEN: When you need a true metric (symmetric, satisfies triangle inequality)
+
+from scipy.spatial.distance import jensenshannon
+
+def detect_drift_jsd(
+    reference: np.ndarray,
+    production: np.ndarray,
+    threshold: float = 0.1,
+    n_bins: int = 50,
+) -> dict:
+    """
+    Jensen-Shannon Divergence for drift detection.
+    
+    JSD = 0 → identical distributions
+    JSD = 1 → completely different distributions
+    
+    Advantages over KL divergence:
+      - Symmetric: JSD(P||Q) = JSD(Q||P)
+      - Always finite (KL can be infinite)
+      - Bounded between 0 and 1
+      - Square root of JSD is a true metric
+    """
+    # Create shared bins
+    all_data = np.concatenate([reference, production])
+    bins = np.histogram_bin_edges(all_data, bins=n_bins)
+    
+    ref_hist = np.histogram(reference, bins=bins, density=True)[0]
+    prod_hist = np.histogram(production, bins=bins, density=True)[0]
+    
+    # Add epsilon and normalize
+    epsilon = 1e-10
+    ref_hist = ref_hist + epsilon
+    prod_hist = prod_hist + epsilon
+    ref_hist = ref_hist / ref_hist.sum()
+    prod_hist = prod_hist / prod_hist.sum()
+    
+    jsd = jensenshannon(ref_hist, prod_hist) ** 2  # Squared for divergence
+    
+    return {
+        "test": "Jensen-Shannon Divergence",
+        "jsd": jsd,
+        "drift_detected": jsd > threshold,
+        "interpretation": (
+            f"JSD = {jsd:.4f}. "
+            f"{'DRIFT DETECTED' if jsd > threshold else 'No drift'}. "
+            f"(threshold: {threshold})"
+        ),
+    }
+```
+
+---
+
+## Production Drift Monitoring Architecture
+
+```
+DRIFT MONITORING PIPELINE — How It Works in Production:
+
+  ┌─────────────┐     ┌──────────────┐     ┌───────────────┐
+  │ Prediction   │     │ Feature      │     │ Drift         │
+  │ Service      │────►│ Logger       │────►│ Detector      │
+  │              │     │              │     │               │
+  │ Makes        │     │ Logs every   │     │ Runs stat     │
+  │ predictions  │     │ input + pred │     │ tests on      │
+  │              │     │ to storage   │     │ sliding       │
+  └─────────────┘     └──────────────┘     │ windows       │
+                                            └───────┬───────┘
+                                                    │
+                              ┌──────────────────────┤
+                              │                      │
+                              ▼                      ▼
+                      ┌──────────────┐       ┌──────────────┐
+                      │ No Drift     │       │ Drift        │
+                      │              │       │ Detected!    │
+                      │ Continue     │       │              │
+                      │ monitoring   │       │ ┌──────────┐ │
+                      └──────────────┘       │ │ Alert    │ │
+                                             │ │ team     │ │
+                                             │ └────┬─────┘ │
+                                             │      │       │
+                                             │ ┌────▼─────┐ │
+                                             │ │ Trigger  │ │
+                                             │ │ retrain  │ │
+                                             │ │ pipeline │ │
+                                             │ └────┬─────┘ │
+                                             │      │       │
+                                             │ ┌────▼─────┐ │
+                                             │ │ Validate │ │
+                                             │ │ new model│ │
+                                             │ └────┬─────┘ │
+                                             │      │       │
+                                             │ ┌────▼─────┐ │
+                                             │ │ Deploy   │ │
+                                             │ │ if better│ │
+                                             │ └──────────┘ │
+                                             └──────────────┘
+```
+
+```python
+# ================================================================
+# COMPLETE DRIFT MONITORING SERVICE — Production Implementation
+# ================================================================
+
+import logging
+from datetime import datetime, timedelta
+from typing import Optional
+
+import numpy as np
+from sqlmodel import Session, select
+
+logger = logging.getLogger(__name__)
+
+
+class DriftMonitor:
+    """
+    Production drift monitoring service.
+    
+    Architecture:
+      1. Store reference distributions from training data
+      2. Collect production predictions in sliding windows
+      3. Compare reference vs production using statistical tests
+      4. Alert and trigger retraining if drift exceeds thresholds
+    
+    Configuration:
+      - window_size: How many recent predictions to compare (e.g., 1000)
+      - check_interval: How often to run drift checks (e.g., every hour)
+      - psi_threshold: PSI above this → drift detected (default 0.2)
+      - ks_threshold: KS p-value below this → drift detected (default 0.01)
+    """
+    
+    def __init__(
+        self,
+        reference_features: np.ndarray,
+        reference_predictions: np.ndarray,
+        feature_names: list[str],
+        window_size: int = 1000,
+        psi_threshold: float = 0.2,
+        ks_significance: float = 0.01,
+    ):
+        self.reference_features = reference_features
+        self.reference_predictions = reference_predictions
+        self.feature_names = feature_names
+        self.window_size = window_size
+        self.psi_threshold = psi_threshold
+        self.ks_significance = ks_significance
+        
+        # Sliding window buffers
+        self.feature_buffer: list[np.ndarray] = []
+        self.prediction_buffer: list[float] = []
+        
+        logger.info(
+            f"DriftMonitor initialized | "
+            f"features={len(feature_names)} | "
+            f"window_size={window_size} | "
+            f"psi_threshold={psi_threshold}"
+        )
+    
+    def log_prediction(
+        self,
+        features: np.ndarray,
+        prediction: float,
+    ) -> None:
+        """Log a prediction for drift monitoring."""
+        self.feature_buffer.append(features)
+        self.prediction_buffer.append(prediction)
+        
+        # Keep only the most recent window
+        if len(self.feature_buffer) > self.window_size:
+            self.feature_buffer = self.feature_buffer[-self.window_size:]
+            self.prediction_buffer = self.prediction_buffer[-self.window_size:]
+    
+    def check_drift(self) -> dict:
+        """
+        Run drift detection on the current window.
+        Returns a comprehensive drift report.
+        """
+        if len(self.feature_buffer) < self.window_size:
+            return {
+                "status": "INSUFFICIENT_DATA",
+                "message": (
+                    f"Need {self.window_size} predictions, "
+                    f"have {len(self.feature_buffer)}"
+                ),
+            }
+        
+        production_features = np.array(self.feature_buffer)
+        production_predictions = np.array(self.prediction_buffer)
+        
+        report = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "window_size": self.window_size,
+            "feature_drift": {},
+            "prediction_drift": {},
+            "overall_drift": False,
+            "drifted_features": [],
+        }
+        
+        # 1. CHECK EACH FEATURE FOR DATA DRIFT
+        for i, feature_name in enumerate(self.feature_names):
+            ref_feature = self.reference_features[:, i]
+            prod_feature = production_features[:, i]
+            
+            # KS test
+            ks_result = detect_drift_ks(
+                ref_feature, prod_feature,
+                significance_level=self.ks_significance,
+            )
+            
+            # PSI
+            psi_result = calculate_psi(ref_feature, prod_feature)
+            
+            feature_report = {
+                "ks_statistic": ks_result["statistic"],
+                "ks_p_value": ks_result["p_value"],
+                "ks_drift": ks_result["drift_detected"],
+                "psi": psi_result["psi"],
+                "psi_severity": psi_result["severity"],
+                "drift_detected": (
+                    ks_result["drift_detected"]
+                    or psi_result["psi"] > self.psi_threshold
+                ),
+            }
+            
+            report["feature_drift"][feature_name] = feature_report
+            
+            if feature_report["drift_detected"]:
+                report["drifted_features"].append(feature_name)
+                report["overall_drift"] = True
+                logger.warning(
+                    f"DRIFT DETECTED in feature '{feature_name}' | "
+                    f"KS={ks_result['statistic']:.4f} | "
+                    f"PSI={psi_result['psi']:.4f}"
+                )
+        
+        # 2. CHECK PREDICTION DISTRIBUTION DRIFT
+        pred_ks = detect_drift_ks(
+            self.reference_predictions,
+            production_predictions,
+            significance_level=self.ks_significance,
+        )
+        pred_psi = calculate_psi(
+            self.reference_predictions,
+            production_predictions,
+        )
+        
+        report["prediction_drift"] = {
+            "ks_statistic": pred_ks["statistic"],
+            "ks_p_value": pred_ks["p_value"],
+            "psi": pred_psi["psi"],
+            "drift_detected": (
+                pred_ks["drift_detected"]
+                or pred_psi["psi"] > self.psi_threshold
+            ),
+        }
+        
+        if report["prediction_drift"]["drift_detected"]:
+            report["overall_drift"] = True
+        
+        # 3. SUMMARY
+        if report["overall_drift"]:
+            report["action"] = "RETRAIN_RECOMMENDED"
+            report["message"] = (
+                f"Drift detected in {len(report['drifted_features'])} features: "
+                f"{report['drifted_features']}. "
+                f"Prediction drift: {report['prediction_drift']['drift_detected']}. "
+                f"Recommend triggering retraining pipeline."
+            )
+            logger.error(f"DRIFT ALERT: {report['message']}")
+        else:
+            report["action"] = "NO_ACTION"
+            report["message"] = "All features within expected distributions."
+        
+        return report
+```
+
+---
+
+## Automated Retraining Triggers
+
+```python
+# ================================================================
+# AUTOMATED RETRAINING DECISION ENGINE
+# ================================================================
+
+class RetrainingDecisionEngine:
+    """
+    Decides WHEN and HOW to retrain based on drift signals.
+    
+    Three trigger modes:
+    
+    1. SCHEDULED: Retrain every N days regardless of drift
+       - Simple, predictable, but wasteful if data doesn't change
+       - Good as a baseline safety net
+    
+    2. DRIFT-TRIGGERED: Retrain only when drift is detected
+       - Efficient (only retrain when needed)
+       - Requires reliable drift detection
+       - Risk: delayed retraining if drift detection is misconfigured
+    
+    3. PERFORMANCE-TRIGGERED: Retrain when accuracy drops
+       - Most accurate signal (directly measures what matters)
+       - Requires ground truth labels (often delayed)
+       - Risk: damage already done by the time you detect it
+    
+    BEST PRACTICE: Combine all three:
+      - Scheduled retraining every 30 days (safety net)
+      - Drift-triggered retraining when PSI > 0.25 (proactive)
+      - Performance-triggered retraining when F1 drops 5% (reactive)
+    """
+    
+    def __init__(
+        self,
+        max_days_without_retrain: int = 30,
+        psi_threshold: float = 0.25,
+        performance_drop_threshold: float = 0.05,
+    ):
+        self.max_days = max_days_without_retrain
+        self.psi_threshold = psi_threshold
+        self.perf_threshold = performance_drop_threshold
+        self.last_retrain_date = datetime.utcnow()
+        self.baseline_f1 = None
+    
+    def should_retrain(
+        self,
+        drift_report: dict,
+        current_f1: Optional[float] = None,
+    ) -> dict:
+        """Evaluate all retraining triggers."""
+        
+        triggers = []
+        
+        # Trigger 1: Scheduled
+        days_since_retrain = (
+            datetime.utcnow() - self.last_retrain_date
+        ).days
+        if days_since_retrain >= self.max_days:
+            triggers.append({
+                "type": "SCHEDULED",
+                "reason": f"{days_since_retrain} days since last retrain",
+                "priority": "MEDIUM",
+            })
+        
+        # Trigger 2: Drift-based
+        if drift_report.get("overall_drift"):
+            max_psi = max(
+                f.get("psi", 0)
+                for f in drift_report.get("feature_drift", {}).values()
+            )
+            triggers.append({
+                "type": "DRIFT",
+                "reason": (
+                    f"Features drifted: {drift_report.get('drifted_features')}. "
+                    f"Max PSI: {max_psi:.4f}"
+                ),
+                "priority": "HIGH",
+            })
+        
+        # Trigger 3: Performance-based
+        if current_f1 is not None and self.baseline_f1 is not None:
+            f1_drop = self.baseline_f1 - current_f1
+            if f1_drop > self.perf_threshold:
+                triggers.append({
+                    "type": "PERFORMANCE",
+                    "reason": (
+                        f"F1 dropped from {self.baseline_f1:.4f} "
+                        f"to {current_f1:.4f} "
+                        f"(Δ = {f1_drop:.4f})"
+                    ),
+                    "priority": "CRITICAL",
+                })
+        
+        should_retrain = len(triggers) > 0
+        
+        return {
+            "should_retrain": should_retrain,
+            "triggers": triggers,
+            "highest_priority": (
+                max(t["priority"] for t in triggers)
+                if triggers
+                else "NONE"
+            ),
+        }
+```
+
+---
+
+## Common Mistakes with Drift Detection
+
+```
+MISTAKE 1: Not establishing a baseline
+  SYMPTOM:  No reference distribution to compare against
+  FIX:      Save reference distributions from training data BEFORE deployment
+            Store as numpy arrays, histograms, or statistical summaries
+
+MISTAKE 2: Using too small a window
+  SYMPTOM:  False drift alerts from normal variance
+  FIX:      Window size should be statistically significant (typically 500-1000+)
+            Run power analysis to determine minimum sample size
+
+MISTAKE 3: Alerting on every feature individually
+  SYMPTOM:  Alert fatigue — with 50 features, some will randomly "drift"
+  FIX:      Use Bonferroni correction: adjust p-value threshold by number of tests
+            Or require N features to drift simultaneously
+
+MISTAKE 4: Only monitoring input features (ignoring prediction drift)
+  SYMPTOM:  Concept drift goes undetected (inputs look the same, outputs wrong)
+  FIX:      Monitor BOTH feature distributions AND prediction distributions
+  
+MISTAKE 5: Retraining too aggressively
+  SYMPTOM:  Model instability — retraining on noisy data makes things worse
+  FIX:      Require drift signals to persist across multiple check windows
+            Use a "cooling period" between retrains (e.g., minimum 7 days)
+            Always validate the new model before deploying (A/B test)
+
+MISTAKE 6: Confusing seasonality with drift
+  SYMPTOM:  "Drift" every Monday because traffic patterns differ from weekends
+  FIX:      Compare against same-time-last-week reference, not overall average
+            Or use seasonal decomposition before drift testing
+```
+
+---
+
+### Interview Q: "How do you detect model drift in production?"
+
+> **Answer:** "We monitor three types of drift: (1) Data drift — input feature distributions shift, detected using the Population Stability Index (PSI) and Kolmogorov-Smirnov tests on a sliding window of recent predictions vs. the training baseline. PSI > 0.25 triggers an alert. (2) Concept drift — the relationship between inputs and outputs changes. We detect this by monitoring prediction accuracy when ground-truth labels become available (often delayed). (3) Prediction drift — the model's output distribution shifts even if inputs look similar. We log every prediction and compare the distribution to training-time predictions. Our retraining decision engine combines scheduled retraining (every 30 days as a safety net), drift-triggered retraining (when PSI exceeds thresholds), and performance-triggered retraining (when F1 drops more than 5%). We apply Bonferroni correction to avoid false alarms when testing many features simultaneously."
+
+### Interview Q: "What's the difference between data drift and concept drift?"
+
+> **Answer:** "Data drift (covariate shift) means the input distribution P(X) changes — for example, CPU usage patterns shift because of a new workload. The model sees inputs it wasn't trained on. Concept drift means the relationship P(Y|X) changes — the same inputs should now produce different outputs. For example, after a system upgrade, high CPU is no longer anomalous. Data drift is detectable without labels using statistical tests on features. Concept drift requires ground-truth labels to detect because the inputs look normal — only the correct output has changed. In practice, we monitor both: statistical tests on features for data drift, and accuracy metrics against delayed ground-truth for concept drift."
+
+---
+
+# 🔄 ML PIPELINE ORCHESTRATION (AIRFLOW / PREFECT) — DEEP DIVE
+
+> **What:** Orchestration tools schedule, coordinate, and monitor complex multi-step
+> ML pipelines — ensuring each step runs in the right order, with the right inputs,
+> at the right time, and alerting you when things go wrong.
+>
+> **Why:** An ML pipeline is not a single script. It's a chain: data ingestion →
+> validation → feature engineering → training → evaluation → deployment. Each step
+> has dependencies, failure modes, and retry logic. Running this manually or with
+> cron jobs doesn't scale — you need a proper orchestrator.
+>
+> **Where:** Between your data sources and your model serving layer. The orchestrator
+> is the "control plane" that coordinates everything.
+>
+> **When:** As soon as you have more than one step in your ML pipeline. If you're
+> running `python train.py` manually, it's time for an orchestrator.
+>
+> **How:** You define your pipeline as a DAG (Directed Acyclic Graph) — a set of
+> tasks with dependencies. The orchestrator handles scheduling, execution, retries,
+> parallelization, logging, and alerting.
+
+---
+
+## Apache Airflow — The Industry Standard
+
+```
+AIRFLOW ARCHITECTURE:
+
+  ┌──────────────────────────────────────────────────────┐
+  │                   AIRFLOW CLUSTER                     │
+  │                                                      │
+  │  ┌────────────┐     ┌────────────┐     ┌──────────┐ │
+  │  │ Web Server │     │ Scheduler  │     │ Metadata │ │
+  │  │            │     │            │     │ Database │ │
+  │  │ UI for     │     │ Reads DAG  │     │          │ │
+  │  │ monitoring │     │ files,     │     │ PostgreSQL│ │
+  │  │ & manual   │     │ schedules  │     │ stores   │ │
+  │  │ triggers   │     │ tasks,     │     │ DAG state│ │
+  │  │            │     │ monitors   │     │ task runs│ │
+  │  └────────────┘     │ execution  │     │ variables│ │
+  │                     └──────┬─────┘     └──────────┘ │
+  │                            │                         │
+  │                     ┌──────▼──────┐                  │
+  │                     │  Executor   │                  │
+  │                     │             │                  │
+  │                     │ Local /     │                  │
+  │                     │ Celery /    │                  │
+  │                     │ Kubernetes  │                  │
+  │                     └──────┬──────┘                  │
+  │                            │                         │
+  │              ┌─────────────┼─────────────┐           │
+  │              │             │             │           │
+  │         ┌────▼────┐  ┌────▼────┐  ┌────▼────┐      │
+  │         │Worker 1 │  │Worker 2 │  │Worker 3 │      │
+  │         │         │  │         │  │         │      │
+  │         │ Runs    │  │ Runs    │  │ Runs    │      │
+  │         │ tasks   │  │ tasks   │  │ tasks   │      │
+  │         └─────────┘  └─────────┘  └─────────┘      │
+  └──────────────────────────────────────────────────────┘
+
+  EXECUTORS — How Airflow Runs Tasks:
+  
+    LocalExecutor:      Single machine, parallel processes
+                        Good for: small teams, development
+    
+    CeleryExecutor:     Distributed workers via Celery + Redis/RabbitMQ
+                        Good for: production, horizontal scaling
+    
+    KubernetesExecutor: Each task runs in its own K8s pod
+                        Good for: isolation, heterogeneous resources
+                        Each task can have its own Docker image!
+```
+
+---
+
+## Airflow DAG — A Complete OpsPilot Example
+
+```python
+# dags/opspilot_training_pipeline.py
+# ================================================================
+# OPSPILOT ML TRAINING PIPELINE — Airflow DAG
+# ================================================================
+#
+# This DAG runs daily, orchestrating the full ML pipeline:
+#   1. Ingest new metrics data
+#   2. Validate data quality
+#   3. Engineer features
+#   4. Train/retrain the anomaly detection model
+#   5. Evaluate model performance
+#   6. Deploy if performance improves
+#
+# Each step is a "task" in the DAG. Tasks are connected by
+# dependencies (>>). Airflow ensures they run in order.
+
+from datetime import datetime, timedelta
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator, BranchPythonOperator
+from airflow.operators.bash import BashOperator
+from airflow.operators.empty import EmptyOperator
+from airflow.providers.slack.operators.slack_webhook import SlackWebhookOperator
+from airflow.utils.trigger_rule import TriggerRule
+
+
+# ================================================================
+# DAG DEFAULT ARGUMENTS
+# ================================================================
+# These apply to ALL tasks in the DAG unless overridden.
+default_args = {
+    "owner": "ml-team",
+    "depends_on_past": False,       # Don't wait for yesterday's run
+    "email": ["ml-alerts@company.com"],
+    "email_on_failure": True,       # Alert on failure
+    "email_on_retry": False,        # Don't alert on retry
+    "retries": 2,                   # Retry failed tasks twice
+    "retry_delay": timedelta(minutes=5),  # Wait 5 min between retries
+    "execution_timeout": timedelta(hours=2),  # Kill task after 2 hours
+}
+
+
+# ================================================================
+# DAG DEFINITION
+# ================================================================
+with DAG(
+    dag_id="opspilot_training_pipeline",
+    default_args=default_args,
+    description="Daily ML training pipeline for anomaly detection",
+    schedule_interval="0 2 * * *",  # Run at 2 AM daily (cron syntax)
+    start_date=datetime(2024, 1, 1),
+    catchup=False,                   # Don't backfill historical runs
+    max_active_runs=1,               # Only one instance at a time
+    tags=["ml", "training", "anomaly-detection"],
+) as dag:
+
+    # ============================================================
+    # TASK 1: INGEST DATA
+    # ============================================================
+    def ingest_data(**context):
+        """
+        Pull new metrics data from the monitoring API.
+        
+        XCom: Push the number of new records for downstream tasks.
+        """
+        import requests
+        
+        # Pull metrics from Prometheus/Grafana API
+        response = requests.get(
+            "http://prometheus:9090/api/v1/query_range",
+            params={
+                "query": "node_cpu_seconds_total",
+                "start": context["data_interval_start"].isoformat(),
+                "end": context["data_interval_end"].isoformat(),
+                "step": "60s",
+            },
+        )
+        data = response.json()
+        
+        # Save to staging area
+        records_count = len(data["data"]["result"])
+        save_to_staging(data, context["ds"])
+        
+        # Push metadata to XCom for downstream tasks
+        context["ti"].xcom_push(key="records_count", value=records_count)
+        return records_count
+    
+    ingest_task = PythonOperator(
+        task_id="ingest_data",
+        python_callable=ingest_data,
+    )
+
+
+    # ============================================================
+    # TASK 2: VALIDATE DATA QUALITY
+    # ============================================================
+    def validate_data(**context):
+        """
+        Run data quality checks:
+        - No null values in critical columns
+        - Values within expected ranges
+        - Minimum number of records
+        - Schema matches expected format
+        
+        Fails the task (and the pipeline) if validation fails.
+        """
+        import pandas as pd
+        
+        records_count = context["ti"].xcom_pull(
+            task_ids="ingest_data",
+            key="records_count",
+        )
+        
+        df = load_staging_data(context["ds"])
+        
+        # Quality checks
+        checks = {
+            "null_check": df.isnull().sum().sum() == 0,
+            "min_records": len(df) >= 100,
+            "cpu_range": df["cpu_percent"].between(0, 100).all(),
+            "memory_range": df["memory_percent"].between(0, 100).all(),
+        }
+        
+        failed_checks = [k for k, v in checks.items() if not v]
+        
+        if failed_checks:
+            raise ValueError(
+                f"Data quality checks failed: {failed_checks}"
+            )
+        
+        context["ti"].xcom_push(key="data_valid", value=True)
+        return True
+    
+    validate_task = PythonOperator(
+        task_id="validate_data",
+        python_callable=validate_data,
+    )
+
+
+    # ============================================================
+    # TASK 3: FEATURE ENGINEERING
+    # ============================================================
+    def engineer_features(**context):
+        """
+        Transform raw metrics into ML features:
+        - Rolling averages (5-min, 15-min, 1-hour)
+        - Rate of change
+        - Z-scores (how many std devs from mean)
+        - Cross-feature ratios
+        """
+        import pandas as pd
+        import numpy as np
+        
+        df = load_staging_data(context["ds"])
+        
+        # Rolling statistics
+        for window in [5, 15, 60]:
+            df[f"cpu_rolling_mean_{window}m"] = (
+                df["cpu_percent"].rolling(window).mean()
+            )
+            df[f"cpu_rolling_std_{window}m"] = (
+                df["cpu_percent"].rolling(window).std()
+            )
+        
+        # Z-scores
+        for col in ["cpu_percent", "memory_percent", "disk_io"]:
+            mean = df[col].mean()
+            std = df[col].std()
+            df[f"{col}_zscore"] = (df[col] - mean) / (std + 1e-8)
+        
+        # Rate of change
+        df["cpu_rate_of_change"] = df["cpu_percent"].diff()
+        
+        # Save features
+        feature_path = save_features(df, context["ds"])
+        context["ti"].xcom_push(key="feature_path", value=feature_path)
+        context["ti"].xcom_push(key="feature_count", value=len(df.columns))
+        
+        return feature_path
+    
+    feature_task = PythonOperator(
+        task_id="engineer_features",
+        python_callable=engineer_features,
+    )
+
+
+    # ============================================================
+    # TASK 4: TRAIN MODEL
+    # ============================================================
+    def train_model(**context):
+        """
+        Train the Isolation Forest model.
+        Uses MLflow for experiment tracking.
+        """
+        import mlflow
+        from sklearn.ensemble import IsolationForest
+        
+        feature_path = context["ti"].xcom_pull(
+            task_ids="engineer_features",
+            key="feature_path",
+        )
+        
+        X_train, X_test = load_and_split(feature_path)
+        
+        with mlflow.start_run(run_name=f"daily_retrain_{context['ds']}"):
+            model = IsolationForest(
+                n_estimators=200,
+                contamination=0.05,
+                max_samples="auto",
+                random_state=42,
+            )
+            model.fit(X_train)
+            
+            # Evaluate
+            scores = model.score_samples(X_test)
+            metrics = compute_metrics(model, X_test)
+            
+            mlflow.log_metrics(metrics)
+            mlflow.sklearn.log_model(model, "anomaly_model")
+            
+            context["ti"].xcom_push(key="f1_score", value=metrics["f1"])
+            context["ti"].xcom_push(
+                key="run_id", value=mlflow.active_run().info.run_id
+            )
+        
+        return metrics
+    
+    train_task = PythonOperator(
+        task_id="train_model",
+        python_callable=train_model,
+    )
+
+
+    # ============================================================
+    # TASK 5: DECIDE WHETHER TO DEPLOY
+    # ============================================================
+    def decide_deploy(**context):
+        """
+        BranchPythonOperator: returns the task_id to execute next.
+        
+        If new model is better → deploy
+        If not → skip deployment
+        """
+        new_f1 = context["ti"].xcom_pull(
+            task_ids="train_model", key="f1_score"
+        )
+        current_f1 = get_production_model_f1()
+        
+        if new_f1 > current_f1 * 1.01:  # 1% improvement threshold
+            return "deploy_model"
+        else:
+            return "skip_deployment"
+    
+    decide_task = BranchPythonOperator(
+        task_id="decide_deploy",
+        python_callable=decide_deploy,
+    )
+
+
+    # ============================================================
+    # TASK 6a: DEPLOY MODEL
+    # ============================================================
+    def deploy_model(**context):
+        """Promote the new model to production in MLflow registry."""
+        import mlflow
+        
+        run_id = context["ti"].xcom_pull(
+            task_ids="train_model", key="run_id"
+        )
+        
+        client = mlflow.tracking.MlflowClient()
+        model_version = client.create_model_version(
+            name="opspilot-anomaly-detector",
+            source=f"runs:/{run_id}/anomaly_model",
+            run_id=run_id,
+        )
+        
+        client.transition_model_version_stage(
+            name="opspilot-anomaly-detector",
+            version=model_version.version,
+            stage="Production",
+        )
+        
+        return f"Deployed model version {model_version.version}"
+    
+    deploy_task = PythonOperator(
+        task_id="deploy_model",
+        python_callable=deploy_model,
+    )
+
+
+    # ============================================================
+    # TASK 6b: SKIP DEPLOYMENT
+    # ============================================================
+    skip_task = EmptyOperator(task_id="skip_deployment")
+
+
+    # ============================================================
+    # TASK 7: NOTIFY TEAM (runs regardless of deploy/skip)
+    # ============================================================
+    notify_task = SlackWebhookOperator(
+        task_id="notify_team",
+        slack_webhook_conn_id="slack_ml_alerts",
+        message=(
+            "🤖 OpsPilot Training Pipeline Complete\n"
+            "Status: {{ task_instance.xcom_pull(task_ids='train_model', key='f1_score') }}\n"
+            "Date: {{ ds }}"
+        ),
+        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+    )
+
+
+    # ============================================================
+    # DAG DEPENDENCIES — The Pipeline Flow
+    # ============================================================
+    # This is how you define the DAG structure:
+    ingest_task >> validate_task >> feature_task >> train_task
+    train_task >> decide_task
+    decide_task >> [deploy_task, skip_task]
+    [deploy_task, skip_task] >> notify_task
+```
+
+```
+THE DAG VISUALIZED:
+
+  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐
+  │ Ingest  │───►│Validate │───►│Features │───►│  Train  │
+  │ Data    │    │ Data    │    │ Engineer│    │  Model  │
+  └─────────┘    └─────────┘    └─────────┘    └────┬────┘
+                                                     │
+                                              ┌──────▼──────┐
+                                              │   Decide    │
+                                              │   Deploy?   │
+                                              └──────┬──────┘
+                                                     │
+                                          ┌──────────┼──────────┐
+                                          │                     │
+                                     ┌────▼────┐          ┌────▼────┐
+                                     │ Deploy  │          │  Skip   │
+                                     │ Model   │          │ Deploy  │
+                                     └────┬────┘          └────┬────┘
+                                          │                     │
+                                          └──────────┬──────────┘
+                                                     │
+                                              ┌──────▼──────┐
+                                              │   Notify    │
+                                              │   Team      │
+                                              └─────────────┘
+```
+
+---
+
+## Key Airflow Concepts
+
+```
+XCOMS — Cross-Communication Between Tasks:
+
+  Tasks are isolated (run in separate processes/containers).
+  XCom lets tasks pass small data (< 48 KB) between each other.
+  
+  # Push data in task A:
+  context["ti"].xcom_push(key="model_f1", value=0.95)
+  
+  # Pull data in task B:
+  f1 = context["ti"].xcom_pull(task_ids="task_a", key="model_f1")
+  
+  ⚠️ XCom is NOT for large data (datasets, models).
+  Use S3/GCS paths or database references instead.
+
+
+SENSORS — Wait for External Events:
+
+  # Wait until a file appears in S3:
+  from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
+  
+  wait_for_data = S3KeySensor(
+      task_id="wait_for_new_data",
+      bucket_name="my-data-lake",
+      bucket_key="daily/{{ ds }}/metrics.parquet",
+      timeout=3600,           # Wait up to 1 hour
+      poke_interval=300,      # Check every 5 minutes
+      mode="reschedule",      # Free up worker while waiting
+  )
+
+
+TRIGGER RULES — When Should a Task Run?
+
+  TriggerRule.ALL_SUCCESS     ← Default: all parents succeeded
+  TriggerRule.ALL_FAILED      ← All parents failed (cleanup task)
+  TriggerRule.ONE_FAILED      ← At least one parent failed (alert)
+  TriggerRule.ONE_SUCCESS     ← At least one parent succeeded
+  TriggerRule.NONE_FAILED     ← No parent failed (some may be skipped)
+  TriggerRule.ALL_DONE        ← All parents completed (success or fail)
+
+
+CONNECTIONS & VARIABLES:
+
+  Connections: Store credentials for external systems
+    (database URLs, API keys, cloud credentials)
+    Stored encrypted in the metadata database
+    Referenced by conn_id in operators
+    
+  Variables: Store config values
+    (feature lists, thresholds, model parameters)
+    Accessible via Variable.get("key")
+    Can store JSON blobs
+```
+
+---
+
+## Prefect — The Modern Alternative
+
+```python
+# ================================================================
+# SAME PIPELINE IN PREFECT — Compare the Syntax
+# ================================================================
+# Prefect is simpler, more Pythonic, and uses a hybrid execution model.
+# Key differences from Airflow:
+#   1. No DAG file parsing — it's just Python code
+#   2. No scheduler polling — event-driven
+#   3. Hybrid model — orchestration in cloud, execution on your infra
+#   4. Native async support
+#   5. Better local development experience
+
+from prefect import flow, task
+from prefect.tasks import task_input_hash
+from datetime import timedelta
+
+
+@task(
+    retries=2,
+    retry_delay_seconds=300,
+    cache_key_fn=task_input_hash,
+    cache_expiration=timedelta(hours=24),
+    log_prints=True,
+)
+def ingest_data(date: str) -> dict:
+    """Pull new metrics data."""
+    import requests
+    
+    response = requests.get(f"http://prometheus:9090/api/v1/query?date={date}")
+    data = response.json()
+    print(f"Ingested {len(data['data']['result'])} records")
+    return data
+
+
+@task(retries=1)
+def validate_data(data: dict) -> bool:
+    """Run quality checks on ingested data."""
+    # Prefect handles data passing natively — no XCom needed!
+    assert len(data["data"]["result"]) >= 100, "Insufficient data"
+    return True
+
+
+@task
+def engineer_features(data: dict) -> str:
+    """Transform raw data to ML features."""
+    import pandas as pd
+    
+    df = pd.DataFrame(data["data"]["result"])
+    # ... feature engineering ...
+    path = "/tmp/features.parquet"
+    df.to_parquet(path)
+    return path
+
+
+@task
+def train_model(feature_path: str) -> dict:
+    """Train and evaluate the model."""
+    import mlflow
+    from sklearn.ensemble import IsolationForest
+    
+    X_train, X_test = load_and_split(feature_path)
+    
+    with mlflow.start_run():
+        model = IsolationForest(n_estimators=200)
+        model.fit(X_train)
+        metrics = evaluate(model, X_test)
+        mlflow.log_metrics(metrics)
+        
+    return metrics
+
+
+@task
+def deploy_if_better(metrics: dict) -> str:
+    """Deploy model if it improves on production."""
+    if metrics["f1"] > get_production_f1() * 1.01:
+        promote_to_production(metrics["run_id"])
+        return "DEPLOYED"
+    return "SKIPPED"
+
+
+# ================================================================
+# THE FLOW — Equivalent to Airflow's DAG
+# ================================================================
+@flow(
+    name="OpsPilot Training Pipeline",
+    description="Daily ML retraining pipeline",
+    retries=1,
+    retry_delay_seconds=600,
+    log_prints=True,
+)
+def training_pipeline(date: str):
+    """
+    The main orchestration flow.
+    
+    In Prefect, you just call functions.
+    Dependencies are inferred from the data flow.
+    No >> operator needed!
+    """
+    # Step 1: Ingest
+    data = ingest_data(date)
+    
+    # Step 2: Validate
+    is_valid = validate_data(data)
+    
+    # Step 3: Features
+    feature_path = engineer_features(data)
+    
+    # Step 4: Train
+    metrics = train_model(feature_path)
+    
+    # Step 5: Deploy
+    result = deploy_if_better(metrics)
+    
+    print(f"Pipeline complete: {result}")
+    return result
+
+
+# Run locally (no infrastructure needed!):
+if __name__ == "__main__":
+    training_pipeline(date="2024-01-15")
+
+# Or schedule via Prefect deployment:
+# prefect deployment build training_pipeline.py:training_pipeline \
+#     --name "daily-retrain" \
+#     --cron "0 2 * * *"
+```
+
+---
+
+## Airflow vs Prefect — Comparison
+
+```
+┌──────────────────┬─────────────────────────┬──────────────────────────┐
+│   Feature        │    Apache Airflow        │     Prefect              │
+├──────────────────┼─────────────────────────┼──────────────────────────┤
+│ Paradigm         │ DAG-first (define DAG,  │ Code-first (just Python, │
+│                  │ then implement tasks)   │ DAG is inferred)         │
+├──────────────────┼─────────────────────────┼──────────────────────────┤
+│ Learning curve   │ Steep (DAG DSL, XCom,   │ Gentle (decorators,      │
+│                  │ connections, hooks)     │ native Python)           │
+├──────────────────┼─────────────────────────┼──────────────────────────┤
+│ Scheduling       │ Built-in scheduler      │ Cloud scheduler or       │
+│                  │ (polling-based)         │ self-hosted (event-based)│
+├──────────────────┼─────────────────────────┼──────────────────────────┤
+│ Data passing     │ XCom (< 48 KB limit)    │ Native Python objects    │
+│                  │                         │ (serialized via Pydantic)│
+├──────────────────┼─────────────────────────┼──────────────────────────┤
+│ Local dev        │ Needs full Airflow      │ Just run Python file     │
+│                  │ instance running        │                          │
+├──────────────────┼─────────────────────────┼──────────────────────────┤
+│ Scaling          │ Celery/K8s executor     │ Distributed workers      │
+│                  │                         │ (Dask, Ray, K8s)         │
+├──────────────────┼─────────────────────────┼──────────────────────────┤
+│ Error handling   │ Retries + callbacks     │ Retries + state handlers │
+│                  │                         │ + native exceptions      │
+├──────────────────┼─────────────────────────┼──────────────────────────┤
+│ Community        │ Massive (10+ years)     │ Growing (5+ years)       │
+├──────────────────┼─────────────────────────┼──────────────────────────┤
+│ Best for         │ Complex ETL, large      │ ML pipelines, modern     │
+│                  │ orgs, data engineering  │ teams, rapid development │
+└──────────────────┴─────────────────────────┴──────────────────────────┘
+
+WHEN TO USE WHICH:
+  
+  Choose Airflow when:
+    ✓ You have complex data engineering pipelines (ETL)
+    ✓ You need extensive ecosystem of providers/plugins
+    ✓ Your organization already uses it
+    ✓ You need fine-grained scheduling (cron + catchup + backfill)
+    
+  Choose Prefect when:
+    ✓ You're building ML pipelines primarily
+    ✓ You want fast local development iteration
+    ✓ You prefer Pythonic, decorator-based APIs
+    ✓ You need dynamic workflows (task parameters at runtime)
+```
+
+---
+
+## Common Mistakes with Orchestration
+
+```
+MISTAKE 1: Putting business logic in the DAG file
+  SYMPTOM:  Huge DAG files that are hard to test and maintain
+  FIX:      DAG file should only define structure. Import logic from modules.
+            DAG file: define tasks + dependencies
+            src/ modules: actual data processing, ML training, etc.
+
+MISTAKE 2: Passing large data through XCom (Airflow)
+  SYMPTOM:  Metadata database bloat, slow task execution
+  FIX:      Pass file paths or database references, not actual data
+            Use S3/GCS for intermediate data, XCom for metadata only
+
+MISTAKE 3: No idempotency
+  SYMPTOM:  Rerunning a failed pipeline creates duplicates / corrupts data
+  FIX:      Every task must be idempotent (safe to re-run)
+            Use "upsert" instead of "insert"
+            Use date-partitioned directories for outputs
+
+MISTAKE 4: No alerting on failure
+  SYMPTOM:  Pipeline fails silently, nobody notices for days
+  FIX:      Configure email/Slack alerts on task failure
+            Set SLAs (expected completion time)
+
+MISTAKE 5: Hardcoded paths and credentials
+  SYMPTOM:  Pipeline breaks in different environments
+  FIX:      Use Airflow Variables/Connections or environment variables
+            Use Jinja templating for dates: {{ ds }}, {{ data_interval_start }}
+```
+
+---
+
+### Interview Q: "How do you orchestrate your ML pipelines?"
+
+> **Answer:** "We use an orchestration framework to define ML pipelines as Directed Acyclic Graphs (DAGs). Our daily retraining pipeline has 7 stages: data ingestion from Prometheus, data quality validation (null checks, range checks, minimum record counts), feature engineering (rolling averages, z-scores, rate of change), model training with MLflow tracking, performance evaluation, conditional deployment (only if the new model improves F1 by > 1%), and team notification via Slack. Each task has retry logic (2 retries with 5-minute delays), execution timeouts (2 hours), and failure alerts. Tasks pass metadata (not data) between each other — actual datasets are stored in S3 and referenced by path. The orchestrator handles scheduling, dependency resolution, parallel execution of independent tasks, and provides a web UI for monitoring pipeline health and manually triggering re-runs."
+
+### Interview Q: "What's the difference between Airflow and Prefect?"
+
+> **Answer:** "Airflow is a DAG-first framework — you define the DAG structure explicitly, then implement tasks. It's the industry standard for complex ETL and data engineering with a massive ecosystem of 500+ provider plugins. Prefect is code-first — you write normal Python functions with decorators, and the dependency graph is inferred from the data flow. Prefect has a lower learning curve, better local development (just run the Python file), and native Python data passing instead of Airflow's XCom (which has a 48KB limit). Airflow excels at complex scheduling (cron + catchup + backfill) and large-scale data engineering. Prefect excels at ML pipelines where you need rapid iteration, dynamic workflows, and native async support. For OpsPilot, either works well — the key design principle is the same: pipeline as code, idempotent tasks, metadata-only data passing, and automated alerting on failure."
+
+---
+
+# 🚀 ADVANCED MODEL SERVING PATTERNS — DEEP DIVE
+
+> **What:** Model serving is the infrastructure and strategy for running ML models
+> in production — handling real-time requests, batch predictions, safe deployments,
+> and serving multiple model versions simultaneously.
+>
+> **Why:** Training a model is 20% of the work. Serving it reliably, safely, and
+> efficiently at scale is the other 80%. A great model is useless if it can't be
+> served with low latency, high availability, and safe rollout practices.
+>
+> **Where:** In the inference layer — between incoming prediction requests and
+> downstream consumers (APIs, dashboards, alerting systems).
+>
+> **When:** Every time you deploy a model to production. The serving strategy
+> must be decided BEFORE deployment, not after.
+>
+> **How:** Choose between real-time serving (REST/gRPC), batch serving (scheduled
+> jobs), or streaming (event-driven). Use shadow mode, A/B testing, and canary
+> deployment for safe model rollouts.
+
+---
+
+## Batch vs Real-Time Inference
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│           BATCH vs REAL-TIME INFERENCE — When to Use Each       │
+├──────────────────────┬─────────────────────────────────────────┤
+│                      │                                         │
+│  REAL-TIME (ONLINE)  │  BATCH (OFFLINE)                        │
+│                      │                                         │
+│  ┌─────────┐         │  ┌─────────┐     ┌──────────┐          │
+│  │ Request │         │  │  Cron   │────►│  Batch   │          │
+│  │ arrives │         │  │  Job    │     │  Runner  │          │
+│  └────┬────┘         │  └─────────┘     └────┬─────┘          │
+│       │              │                        │                │
+│  ┌────▼────┐         │  ┌─────────────────────▼────────────┐  │
+│  │  Model  │         │  │    Process ALL records in bulk    │  │
+│  │ predict │         │  │    (could be millions of rows)    │  │
+│  └────┬────┘         │  └─────────────────────┬────────────┘  │
+│       │              │                        │                │
+│  ┌────▼────┐         │  ┌─────────────────────▼────────────┐  │
+│  │Response │         │  │  Write predictions to database   │  │
+│  │  ~50ms  │         │  │  or data lake                    │  │
+│  └─────────┘         │  └──────────────────────────────────┘  │
+│                      │                                         │
+│  CHARACTERISTICS:    │  CHARACTERISTICS:                       │
+│  • Single request    │  • Bulk processing                     │
+│  • Low latency       │  • High throughput                     │
+│  • Stateless API     │  • Can use GPUs efficiently            │
+│  • Always running    │  • Runs on schedule                    │
+│  • Higher cost/pred  │  • Lower cost/pred                     │
+│                      │                                         │
+│  USE WHEN:           │  USE WHEN:                              │
+│  • User is waiting   │  • Pre-computing recommendations       │
+│  • Need instant      │  • Daily risk scoring                  │
+│    decisions         │  • Weekly churn prediction              │
+│  • API-driven apps   │  • Bulk data processing                │
+│  • Fraud detection   │  • Generating reports                  │
+│                      │                                         │
+│  OPSPILOT:           │  OPSPILOT:                              │
+│  Real-time anomaly   │  Batch retrain on daily metrics        │
+│  detection on API    │  Pre-compute anomaly scores for        │
+│  requests            │  dashboard                             │
+└──────────────────────┴─────────────────────────────────────────┘
+
+HYBRID APPROACH (What OpsPilot Uses):
+
+  ┌──────────────┐         ┌──────────────┐
+  │  Real-time   │         │   Batch      │
+  │  API calls   │         │   Pipeline   │
+  │              │         │              │
+  │  /predict    │         │  2 AM daily  │
+  │  endpoint    │         │  retrain +   │
+  │  ~50ms       │         │  pre-compute │
+  └──────┬───────┘         └──────┬───────┘
+         │                        │
+         │   ┌──────────────┐     │
+         └──►│  Same Model  │◄────┘
+             │  (via MLflow │
+             │   Registry)  │
+             └──────────────┘
+```
+
+---
+
+## Shadow Deployment — Risk-Free Model Testing
+
+```
+SHADOW MODE — What It Is:
+
+  The NEW model runs alongside the OLD model in production.
+  Both receive the same requests, but ONLY the old model's
+  predictions are served to users. The new model's predictions
+  are logged for comparison.
+
+  ┌─────────┐     ┌───────────────────────────────────┐
+  │ Incoming │     │         SHADOW DEPLOYMENT         │
+  │ Request  │────►│                                   │
+  │          │     │  ┌──────────────┐                 │
+  └─────────┘     │  │ Production   │──── Response ───►  User
+                  │  │ Model v1     │                 │
+                  │  └──────────────┘                 │
+                  │                                   │
+                  │  ┌──────────────┐                 │
+                  │  │ Shadow       │──── Log only ──►  Monitoring
+                  │  │ Model v2     │  (not served)   │
+                  │  └──────────────┘                 │
+                  └───────────────────────────────────┘
+
+  WHY THIS IS BRILLIANT:
+    ✓ Zero risk to users (they never see shadow predictions)
+    ✓ Real production traffic (not synthetic test data)
+    ✓ Compare v1 vs v2 on ACTUAL data distribution
+    ✓ Catch performance regressions before they affect users
+    ✓ Gradual confidence building before switchover
+```
+
+```python
+# ================================================================
+# SHADOW MODE IMPLEMENTATION
+# ================================================================
+
+from fastapi import FastAPI, Request
+import logging
+
+app = FastAPI()
+logger = logging.getLogger(__name__)
+
+
+class ShadowModelServer:
+    """
+    Serves predictions from the production model while
+    simultaneously running predictions through a shadow model
+    for comparison.
+    """
+    
+    def __init__(self):
+        self.production_model = load_model("Production")
+        self.shadow_model = load_model("Staging")
+        self.comparison_log = []
+    
+    async def predict(self, features: dict) -> dict:
+        """
+        Run both models, return only production result.
+        """
+        import asyncio
+        import time
+        
+        # Run both models concurrently (async)
+        start = time.monotonic()
+        prod_task = asyncio.create_task(
+            self._predict_async(self.production_model, features)
+        )
+        shadow_task = asyncio.create_task(
+            self._predict_async(self.shadow_model, features)
+        )
+        
+        # Wait for both (shadow can't slow down production)
+        prod_result = await prod_task
+        
+        try:
+            # Give shadow model limited time (don't block if slow)
+            shadow_result = await asyncio.wait_for(
+                shadow_task, timeout=0.5  # 500ms max
+            )
+        except asyncio.TimeoutError:
+            shadow_result = {"error": "timeout"}
+            logger.warning("Shadow model timed out")
+        
+        # Log comparison (async, non-blocking)
+        self._log_comparison(features, prod_result, shadow_result)
+        
+        # Return ONLY production result to user
+        return prod_result
+    
+    def _log_comparison(
+        self,
+        features: dict,
+        prod_result: dict,
+        shadow_result: dict,
+    ):
+        """
+        Log the comparison for later analysis.
+        
+        Key metrics to track:
+        - Agreement rate (how often do they agree?)
+        - Disagreement analysis (when they differ, who's right?)
+        - Latency comparison (is shadow faster/slower?)
+        """
+        agreement = prod_result.get("prediction") == shadow_result.get("prediction")
+        
+        logger.info(
+            "shadow_comparison",
+            extra={
+                "production_prediction": prod_result.get("prediction"),
+                "shadow_prediction": shadow_result.get("prediction"),
+                "agreement": agreement,
+                "production_confidence": prod_result.get("confidence"),
+                "shadow_confidence": shadow_result.get("confidence"),
+            },
+        )
+```
+
+---
+
+## A/B Testing Models — Data-Driven Decisions
+
+```
+A/B TESTING MODELS — Split Traffic Between Versions:
+
+  ┌─────────┐     ┌───────────────────────────────────┐
+  │ Incoming │     │         A/B TEST (90/10 split)    │
+  │ Request  │────►│                                   │
+  │          │     │  ┌──────────────┐                 │
+  └─────────┘     │  │ Model A (90%)│──── Response ──►  Group A users
+                  │  │ (production) │                 │
+                  │  └──────────────┘                 │
+                  │                                   │
+                  │  ┌──────────────┐                 │
+                  │  │ Model B (10%)│──── Response ──►  Group B users
+                  │  │ (challenger) │                 │
+                  │  └──────────────┘                 │
+                  └───────────────────────────────────┘
+
+  Key Principles:
+    1. RANDOM assignment — each request randomly routed (hash-based)
+    2. CONSISTENT — same user always sees same model (sticky sessions)
+    3. MEASURABLE — track metrics per group (accuracy, latency, etc.)
+    4. SIGNIFICANT — run until statistically significant (p < 0.05)
+    5. REVERSIBLE — can instantly roll back to 100% model A
+```
+
+```python
+# ================================================================
+# A/B TESTING ROUTER
+# ================================================================
+import hashlib
+import random
+
+
+class ABTestRouter:
+    """
+    Routes prediction requests between model versions
+    based on traffic split configuration.
+    """
+    
+    def __init__(
+        self,
+        model_a,           # Production model
+        model_b,           # Challenger model
+        traffic_split: float = 0.1,  # 10% to model B
+    ):
+        self.model_a = model_a
+        self.model_b = model_b
+        self.traffic_split = traffic_split
+    
+    def route(self, request_id: str) -> tuple:
+        """
+        Deterministic routing based on request_id hash.
+        Same request_id always goes to the same model.
+        """
+        # Hash ensures consistent routing
+        hash_value = int(
+            hashlib.md5(request_id.encode()).hexdigest(), 16
+        )
+        bucket = (hash_value % 100) / 100
+        
+        if bucket < self.traffic_split:
+            return self.model_b, "B"
+        else:
+            return self.model_a, "A"
+    
+    def predict(self, request_id: str, features: dict) -> dict:
+        model, variant = self.route(request_id)
+        prediction = model.predict(features)
+        
+        # Log which variant served (for analysis)
+        return {
+            "prediction": prediction,
+            "variant": variant,
+            "model_version": model.version,
+        }
+```
+
+---
+
+## Feature Store — Production Feature Management
+
+```
+FEATURE STORE — Why You Need One:
+
+  WITHOUT Feature Store:
+    ┌─────────────┐     ┌─────────────┐
+    │ Training    │     │ Serving     │
+    │ Pipeline    │     │ Pipeline    │
+    │             │     │             │
+    │ Computes    │     │ Computes    │     ← DIFFERENT CODE!
+    │ features    │     │ features    │     ← Subtle bugs!
+    │ in Python   │     │ in Python   │     ← Training-Serving Skew!
+    └─────────────┘     └─────────────┘
+
+  WITH Feature Store:
+    ┌─────────────┐     ┌─────────────┐
+    │ Training    │     │ Serving     │
+    │ Pipeline    │     │ Pipeline    │
+    │             │     │             │
+    │ Read from ──┼─────┼── Read from │
+    │ Feature     │     │ Feature     │
+    │ Store       │     │ Store       │     ← SAME FEATURES!
+    └─────────────┘     └─────────────┘     ← Zero skew!
+                  │     │
+           ┌──────▼─────▼──────┐
+           │   FEATURE STORE    │
+           │                    │
+           │ Offline Store:     │  ← Historical features (training)
+           │   S3/BigQuery      │
+           │                    │
+           │ Online Store:      │  ← Latest features (serving)
+           │   Redis/DynamoDB   │     Low-latency lookups
+           │                    │
+           │ Feature Registry:  │  ← Feature definitions + metadata
+           │   What, when, who  │     Version history, lineage
+           └────────────────────┘
+
+  TRAINING-SERVING SKEW — The #1 ML Bug in Production:
+    - Model trained on feature computed as: mean(last_30_days)
+    - Serving computes feature as: mean(last_7_days) ← BUG! Different window!
+    - Model gets subtly wrong inputs → wrong predictions
+    - Feature store prevents this by providing a SINGLE source of truth
+
+  POPULAR FEATURE STORES:
+    Feast (open-source):  Python-native, integrates with everything
+    Tecton:               Managed, enterprise-grade
+    Hopsworks:            Open-source, built-in feature monitoring  
+    Vertex AI FS:         Google Cloud managed
+    SageMaker FS:         AWS managed
+```
+
+---
+
+## Model Compression — Serving at Scale
+
+```
+MODEL COMPRESSION TECHNIQUES — Reduce Latency & Cost:
+
+  1. QUANTIZATION — Reduce numeric precision
+     ┌────────────────────────────────────────────┐
+     │ float32 → int8                              │
+     │ 4 bytes → 1 byte per parameter             │
+     │ 4x smaller model, 2-4x faster inference    │
+     │                                             │
+     │ Types:                                      │
+     │   Post-training: Quantize after training    │
+     │   Quantization-aware: Train with quantize   │
+     │                                             │
+     │ Accuracy loss: 0.1-1% typically             │
+     └────────────────────────────────────────────┘
+
+  2. KNOWLEDGE DISTILLATION — Train a smaller model
+     ┌────────────────────────────────────────────┐
+     │ Teacher (large) → Student (small)           │
+     │                                             │
+     │ Train the student to mimic the teacher's    │
+     │ predictions, not the ground truth labels.   │
+     │                                             │
+     │ Student learns the teacher's "soft" outputs │
+     │ (probability distributions, not just 0/1)   │
+     │                                             │
+     │ Result: 3-10x smaller model, ~95% accuracy  │
+     └────────────────────────────────────────────┘
+
+  3. PRUNING — Remove unnecessary parameters
+     ┌────────────────────────────────────────────┐
+     │ Remove neurons/connections with near-zero   │
+     │ weights (they contribute almost nothing).   │
+     │                                             │
+     │ Before: 100M parameters                     │
+     │ After:  30M parameters (70% pruned)         │
+     │ Accuracy: ~99% of original                  │
+     │                                             │
+     │ Types:                                      │
+     │   Unstructured: Remove individual weights   │
+     │   Structured: Remove entire neurons/layers  │
+     └────────────────────────────────────────────┘
+
+  4. ONNX RUNTIME — Cross-Platform Optimized Inference
+     ┌────────────────────────────────────────────┐
+     │ Convert model to ONNX format               │
+     │ ONNX Runtime applies graph optimizations:  │
+     │   - Operator fusion                        │
+     │   - Constant folding                       │
+     │   - Memory planning                        │
+     │                                             │
+     │ Result: 2-3x faster inference               │
+     │ Works on CPU, GPU, mobile, edge devices     │
+     └────────────────────────────────────────────┘
+
+  FOR OPSPILOT (Isolation Forest):
+    - Model is already small (~10 MB) — compression not critical
+    - BUT for scaling: ONNX conversion gives ~2x inference speedup
+    - For edge deployment: quantization reduces to ~2.5 MB
+```
+
+---
+
+## Common Mistakes with Model Serving
+
+```
+MISTAKE 1: No model version tracking in predictions
+  SYMPTOM:  Can't tell which model version produced a prediction
+  FIX:      Include model_version in every prediction response
+            Log model version with every prediction for audit
+
+MISTAKE 2: Loading model on every request
+  SYMPTOM:  First-request latency spike, high memory churn
+  FIX:      Load model ONCE at startup (lifespan/startup event)
+            Keep in memory as a singleton
+
+MISTAKE 3: No fallback for model loading failures
+  SYMPTOM:  Entire API crashes if model can't be loaded
+  FIX:      Keep previous model version as fallback
+            Return degraded response (e.g., "unknown") instead of 500
+
+MISTAKE 4: Ignoring preprocessing in serving
+  SYMPTOM:  Training-serving skew — model gets different features
+  FIX:      Serialize the ENTIRE pipeline (preprocessing + model)
+            Use sklearn Pipeline or ONNX to bundle everything
+
+MISTAKE 5: No input validation on prediction requests
+  SYMPTOM:  Model crashes on unexpected inputs (NaN, wrong types)
+  FIX:      Use Pydantic models to validate ALL inputs
+            Reject requests with out-of-range features
+
+MISTAKE 6: Synchronous model loading on startup
+  SYMPTOM:  Health check passes but model isn't ready
+  FIX:      Use readiness probes (separate from liveness probes)
+            /health/ready returns 200 only AFTER model is loaded
+```
+
+---
+
+### Interview Q: "How do you deploy ML models safely?"
+
+> **Answer:** "We use a graduated deployment strategy: (1) Shadow deployment — the new model runs alongside production, receiving the same traffic but not serving predictions. We compare the shadow model's predictions against the production model for agreement rate and accuracy. (2) If shadow results look good, we move to A/B testing — 10% of traffic goes to the new model, 90% stays with production. We measure key metrics (precision, recall, latency) per group and wait for statistical significance. (3) If the challenger wins, we gradually increase traffic (10% → 25% → 50% → 100%) using canary deployment. Each step has automatic rollback triggers if error rate exceeds thresholds. (4) The old model stays loaded as a fallback throughout the entire process. This entire flow is orchestrated via our ML pipeline and typically takes 3-5 days for a full rollout."
+
+### Interview Q: "What is training-serving skew and how do you prevent it?"
+
+> **Answer:** "Training-serving skew is when the features computed during training differ from those computed during serving — the #1 source of silent ML production failures. For example, if training computes a rolling average over 30 days but serving accidentally uses 7 days, the model receives subtly wrong inputs. We prevent this by: (1) using a Feature Store that provides a single source of truth for feature computation — the same code computes features for both training and serving. (2) Serializing the entire pipeline (preprocessing + model) using sklearn Pipeline or ONNX, ensuring transformations are bundled with the model. (3) Integration testing that sends known inputs through both the training and serving pipelines and asserts identical feature vectors."
+
+---
+
+# 🏗️ INFRASTRUCTURE AS CODE (TERRAFORM) — DEEP DIVE
+
+> **What:** Infrastructure as Code (IaC) is the practice of defining infrastructure
+> (servers, databases, networks, load balancers) as machine-readable configuration
+> files rather than manually clicking through cloud consoles.
+>
+> **Why:** Manual infrastructure is unreproducible, error-prone, and untraceable.
+> IaC gives you: (1) Version control — infrastructure changes tracked in Git.
+> (2) Reproducibility — spin up identical environments reliably.
+> (3) Automation — CI/CD can provision infrastructure automatically.
+> (4) Documentation — the code IS the documentation.
+>
+> **Where:** For ALL infrastructure — dev, staging, and production environments.
+> Every resource should be defined in code: VPCs, subnets, databases, K8s clusters,
+> DNS records, IAM policies, monitoring dashboards.
+>
+> **When:** From Day 1 of any project that uses cloud resources. Retrofitting IaC
+> onto manually-created infrastructure is extremely painful.
+>
+> **How:** Terraform uses a declarative language (HCL) to define desired state.
+> You declare WHAT you want, Terraform figures out HOW to create it.
+
+---
+
+## Terraform vs Other IaC Tools
+
+```
+┌──────────────┬──────────────┬──────────────┬──────────────┐
+│   Feature    │  Terraform   │ CloudFormation│  Pulumi      │
+├──────────────┼──────────────┼──────────────┼──────────────┤
+│ Cloud        │ Multi-cloud  │ AWS only     │ Multi-cloud  │
+│ support      │ (AWS, GCP,   │              │              │
+│              │  Azure, etc) │              │              │
+├──────────────┼──────────────┼──────────────┼──────────────┤
+│ Language     │ HCL          │ YAML/JSON    │ Python, Go,  │
+│              │ (declarative)│ (declarative)│ TS, C#       │
+│              │              │              │ (imperative) │
+├──────────────┼──────────────┼──────────────┼──────────────┤
+│ State mgmt   │ Explicit     │ Managed by   │ Explicit     │
+│              │ (local/S3)   │ AWS          │ (Pulumi svc) │
+├──────────────┼──────────────┼──────────────┼──────────────┤
+│ Dry run      │ terraform    │ Change sets  │ pulumi       │
+│              │ plan         │              │ preview      │
+├──────────────┼──────────────┼──────────────┼──────────────┤
+│ Learning     │ Medium       │ AWS-specific │ Low (if you  │
+│ curve        │              │              │ know Python) │
+├──────────────┼──────────────┼──────────────┼──────────────┤
+│ Community    │ Largest      │ AWS docs     │ Growing      │
+│              │              │ focused      │              │
+└──────────────┴──────────────┴──────────────┴──────────────┘
+```
+
+---
+
+## Terraform Workflow — The Four Commands
+
+```
+THE TERRAFORM LIFECYCLE:
+
+  ┌──────────────────────────────────────────────────────┐
+  │                                                      │
+  │   terraform init                                     │
+  │   ┌──────────────────────────────────────────┐       │
+  │   │ Download provider plugins (AWS, GCP, etc)│       │
+  │   │ Initialize backend (state storage)       │       │
+  │   │ Download modules                         │       │
+  │   └──────────────────────────────────────────┘       │
+  │                    │                                  │
+  │                    ▼                                  │
+  │   terraform plan                                     │
+  │   ┌──────────────────────────────────────────┐       │
+  │   │ Compare desired state (code) vs current  │       │
+  │   │ state (state file). Show what will change│       │
+  │   │                                          │       │
+  │   │ Output: "Plan: 3 to add, 1 to change,   │       │
+  │   │         0 to destroy"                    │       │
+  │   │                                          │       │
+  │   │ THIS IS YOUR "DRY RUN" — review before   │       │
+  │   │ applying any changes!                    │       │
+  │   └──────────────────────────────────────────┘       │
+  │                    │                                  │
+  │                    ▼                                  │
+  │   terraform apply                                    │
+  │   ┌──────────────────────────────────────────┐       │
+  │   │ Execute the plan — create/update/delete  │       │
+  │   │ resources to match desired state         │       │
+  │   │                                          │       │
+  │   │ API calls to cloud provider              │       │
+  │   │ Updates state file with actual resource  │       │
+  │   │ IDs, IPs, etc.                           │       │
+  │   └──────────────────────────────────────────┘       │
+  │                    │                                  │
+  │                    ▼                                  │
+  │   terraform destroy                                  │
+  │   ┌──────────────────────────────────────────┐       │
+  │   │ Delete ALL resources defined in code     │       │
+  │   │ Clean up state file                      │       │
+  │   │ USE WITH EXTREME CAUTION in production!  │       │
+  │   └──────────────────────────────────────────┘       │
+  │                                                      │
+  └──────────────────────────────────────────────────────┘
+```
+
+---
+
+## Terraform for OpsPilot — Complete AWS Example
+
+```hcl
+# ================================================================
+# main.tf — OpsPilot Infrastructure Definition
+# ================================================================
+# This file defines ALL cloud infrastructure for OpsPilot:
+# - VPC (networking)
+# - ECS cluster (container orchestration)
+# - RDS PostgreSQL (database)
+# - ElastiCache Redis (caching)
+# - ALB (load balancer)
+# - S3 (model storage)
+# - CloudWatch (monitoring)
+
+# ============================================================
+# PROVIDER — Which cloud and region
+# ============================================================
+terraform {
+  required_version = ">= 1.5.0"
+  
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+  
+  # REMOTE STATE — Store state in S3 (not locally!)
+  # This enables team collaboration and state locking
+  backend "s3" {
+    bucket         = "opspilot-terraform-state"
+    key            = "prod/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true
+    dynamodb_table = "terraform-locks"  # State locking via DynamoDB
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+  
+  default_tags {
+    tags = {
+      Project     = "OpsPilot"
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+    }
+  }
+}
+
+
+# ============================================================
+# VARIABLES — Configurable inputs
+# ============================================================
+variable "aws_region" {
+  description = "AWS region to deploy to"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "environment" {
+  description = "Deployment environment (dev, staging, prod)"
+  type        = string
+  default     = "prod"
+  
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "Environment must be dev, staging, or prod."
+  }
+}
+
+variable "db_password" {
+  description = "RDS database password"
+  type        = string
+  sensitive   = true  # Never shown in logs or plan output
+}
+
+
+# ============================================================
+# VPC — Networking Foundation
+# ============================================================
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.4.0"
+  
+  name = "opspilot-${var.environment}"
+  cidr = "10.0.0.0/16"
+  
+  azs             = ["${var.aws_region}a", "${var.aws_region}b"]
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24"]
+  
+  enable_nat_gateway = true
+  single_nat_gateway = var.environment != "prod"  # Cost saving for non-prod
+  
+  tags = {
+    Component = "networking"
+  }
+}
+
+
+# ============================================================
+# RDS — PostgreSQL Database
+# ============================================================
+resource "aws_db_instance" "postgres" {
+  identifier = "opspilot-${var.environment}"
+  
+  engine               = "postgres"
+  engine_version       = "15.4"
+  instance_class       = var.environment == "prod" ? "db.r6g.large" : "db.t3.micro"
+  allocated_storage    = 100
+  max_allocated_storage = 500  # Auto-scaling storage
+  
+  db_name  = "opspilot"
+  username = "opspilot_admin"
+  password = var.db_password
+  
+  # High Availability
+  multi_az = var.environment == "prod"  # Multi-AZ ONLY in production
+  
+  # Backups
+  backup_retention_period = var.environment == "prod" ? 30 : 7
+  backup_window           = "03:00-04:00"  # UTC
+  
+  # Security
+  vpc_security_group_ids = [aws_security_group.db.id]
+  db_subnet_group_name   = aws_db_subnet_group.default.name
+  publicly_accessible    = false  # NEVER expose DB to internet
+  storage_encrypted      = true
+  
+  # Maintenance
+  maintenance_window          = "Sun:04:00-Sun:05:00"
+  auto_minor_version_upgrade  = true
+  deletion_protection         = var.environment == "prod"
+  
+  tags = {
+    Component = "database"
+  }
+}
+
+
+# ============================================================
+# ECS — Container Orchestration (Alternative to K8s)
+# ============================================================
+resource "aws_ecs_cluster" "main" {
+  name = "opspilot-${var.environment}"
+  
+  setting {
+    name  = "containerInsights"
+    value = "enabled"  # CloudWatch Container Insights
+  }
+}
+
+resource "aws_ecs_service" "api" {
+  name            = "opspilot-api"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.api.arn
+  desired_count   = var.environment == "prod" ? 3 : 1
+  launch_type     = "FARGATE"  # Serverless containers
+  
+  network_configuration {
+    subnets         = module.vpc.private_subnets
+    security_groups = [aws_security_group.api.id]
+  }
+  
+  load_balancer {
+    target_group_arn = aws_lb_target_group.api.arn
+    container_name   = "opspilot-api"
+    container_port   = 8000
+  }
+}
+
+
+# ============================================================
+# OUTPUTS — Values to reference after apply
+# ============================================================
+output "api_endpoint" {
+  description = "URL of the OpsPilot API"
+  value       = "https://${aws_lb.main.dns_name}"
+}
+
+output "database_endpoint" {
+  description = "RDS endpoint (don't expose publicly!)"
+  value       = aws_db_instance.postgres.endpoint
+  sensitive   = true
+}
+```
+
+---
+
+## Terraform State — The Critical Concept
+
+```
+STATE FILE — What It Is and Why It Matters:
+
+  The state file (terraform.tfstate) is a JSON file that maps
+  your Terraform configuration to real cloud resources.
+
+  ┌────────────────┐     ┌──────────────────┐     ┌──────────────┐
+  │ Your Code      │     │ State File       │     │ Real Cloud   │
+  │ (*.tf files)   │     │ (tfstate)        │     │ Resources    │
+  │                │     │                  │     │              │
+  │ "I want an     │     │ "The RDS instance│     │ Actual RDS   │
+  │  RDS instance" │◄───►│  has ID          │◄───►│ instance     │
+  │                │     │  db-abc123..."   │     │ running in   │
+  │                │     │                  │     │ AWS          │
+  └────────────────┘     └──────────────────┘     └──────────────┘
+
+  terraform plan: compares CODE vs STATE vs REALITY
+  terraform apply: updates REALITY to match CODE, updates STATE
+
+  ⚠️ CRITICAL RULES:
+    1. NEVER edit the state file manually
+    2. NEVER store state locally in production (use S3 + DynamoDB)
+    3. ALWAYS enable state locking (prevents concurrent modifications)
+    4. ALWAYS encrypt state (it contains passwords, keys, etc.)
+    5. ALWAYS use terraform plan before terraform apply
+
+  REMOTE STATE STORAGE:
+    ┌──────────────────────────────────────────┐
+    │  terraform {                              │
+    │    backend "s3" {                         │
+    │      bucket         = "my-tf-state"       │
+    │      key            = "prod/state.tfstate"│
+    │      region         = "us-east-1"         │
+    │      encrypt        = true                │
+    │      dynamodb_table = "tf-locks"          │
+    │    }                                      │
+    │  }                                        │
+    └──────────────────────────────────────────┘
+
+  STATE LOCKING (DynamoDB):
+    Developer A: terraform apply → acquires lock
+    Developer B: terraform apply → "Error: state is locked by A"
+    Developer A: apply completes → lock released
+    Developer B: terraform apply → acquires lock → proceeds
+```
+
+---
+
+## Terraform Modules — Reusable Infrastructure
+
+```
+MODULES — Like Functions, But for Infrastructure:
+
+  modules/
+  ├── vpc/                 # Network module
+  │   ├── main.tf
+  │   ├── variables.tf
+  │   └── outputs.tf
+  ├── database/            # Database module
+  │   ├── main.tf
+  │   ├── variables.tf
+  │   └── outputs.tf
+  └── ecs-service/         # Container service module
+      ├── main.tf
+      ├── variables.tf
+      └── outputs.tf
+
+  # Using modules in your main config:
+  module "production_db" {
+    source = "./modules/database"
+    
+    environment  = "prod"
+    instance_class = "db.r6g.large"
+    multi_az     = true
+  }
+
+  module "staging_db" {
+    source = "./modules/database"
+    
+    environment  = "staging"
+    instance_class = "db.t3.micro"
+    multi_az     = false
+  }
+  
+  # SAME MODULE, different configs
+  # Identical structure, just different parameters
+  # No code duplication!
+```
+
+---
+
+## Common Mistakes with Terraform
+
+```
+MISTAKE 1: Storing state locally
+  SYMPTOM:  Only one developer can manage infrastructure
+  FIX:      Use remote backend (S3 + DynamoDB for locking)
+
+MISTAKE 2: Not using terraform plan
+  SYMPTOM:  Accidentally destroying production resources
+  FIX:      ALWAYS run plan first. In CI/CD, require manual approval
+            between plan and apply
+
+MISTAKE 3: Hardcoding values
+  SYMPTOM:  Can't reuse code across environments
+  FIX:      Use variables for everything that differs between envs
+            Use locals for computed values
+
+MISTAKE 4: Monolithic configuration
+  SYMPTOM:  1000+ line main.tf, slow plans, risky applies
+  FIX:      Split into modules by component
+            Use separate state files per environment (workspaces)
+
+MISTAKE 5: Not tagging resources
+  SYMPTOM:  Can't identify who owns what or track costs
+  FIX:      Use default_tags in provider block
+            Tag everything with Project, Environment, ManagedBy
+
+MISTAKE 6: Forgetting to protect production
+  SYMPTOM:  Someone runs terraform destroy on prod
+  FIX:      Use lifecycle { prevent_destroy = true } on critical resources
+            Use deletion_protection on databases
+            Require manual approval in CI/CD pipeline
+```
+
+---
+
+### Interview Q: "How do you manage infrastructure?"
+
+> **Answer:** "We use Terraform (Infrastructure as Code) to define ALL cloud resources — VPCs, databases, container clusters, load balancers, and monitoring — in version-controlled HCL files. The workflow is: `terraform init` to download providers, `terraform plan` to preview changes (mandatory review step), and `terraform apply` to execute. State is stored in S3 with DynamoDB locking to prevent concurrent modifications by team members. We use modules to avoid duplication — the same database module creates both production (multi-AZ, encrypted, large instance) and staging (single-AZ, small instance) databases with different variable inputs. In CI/CD, `terraform plan` runs on every PR for review, and `terraform apply` requires manual approval for production. Every resource is tagged with Project, Environment, and ManagedBy for cost tracking and ownership."
+
+### Interview Q: "What is Terraform state and why is it important?"
+
+> **Answer:** "Terraform state (`tfstate`) is a JSON file that maps your code definitions to real cloud resource IDs. When you write `resource 'aws_db_instance' 'postgres'` in code, the state file records that this maps to `db-abc123` in AWS. `terraform plan` compares your code against the state to determine what changed. Without state, Terraform wouldn't know which cloud resources it manages vs. ones created manually. Critical rules: (1) Never edit state manually. (2) Store state remotely (S3) with encryption — it contains sensitive data like database endpoints. (3) Enable state locking (DynamoDB) to prevent two people from applying simultaneously. (4) Use separate state files per environment to isolate blast radius."
+
+---
+
+# 🔐 SECRETS MANAGEMENT (HASHICORP VAULT) — DEEP DIVE
+
+> **What:** Vault is a secrets management system that centrally stores, controls access to,
+> and audits every secret (API keys, database passwords, TLS certificates, tokens).
+>
+> **Why:** Secrets sprawl is the #1 security vulnerability in production systems.
+> Passwords in `.env` files, API keys in Docker images, database URLs in logs — all
+> catastrophic. Vault provides: encrypted storage, dynamic secrets, automatic rotation,
+> fine-grained access control, and full audit logging.
+>
+> **Where:** Every production system. Vault sits between your applications and their
+> secrets. Applications request secrets from Vault at runtime.
+>
+> **When:** When .env files stop scaling — multiple services, multiple environments,
+> secrets that need rotation, compliance requirements (SOC2, HIPAA, PCI-DSS).
+>
+> **How:** Applications authenticate to Vault (via token, K8s service account, or IAM role),
+> request specific secrets by path, and receive them for a limited time (TTL).
+
+---
+
+## The Secrets Hierarchy — From Development to Production
+
+```
+SECRETS MANAGEMENT MATURITY MODEL:
+
+  Level 0: HARDCODED (NEVER DO THIS)
+  ┌─────────────────────────────────────────────┐
+  │ db_password = "P@ssw0rd123"  # In source    │ ← CATASTROPHIC
+  │ api_key = "sk-abc123..."     # In code      │ ← If leaked, game over
+  └─────────────────────────────────────────────┘
+
+  Level 1: ENVIRONMENT VARIABLES / .env files
+  ┌─────────────────────────────────────────────┐
+  │ .env file (not in Git):                      │
+  │ DATABASE_URL=postgresql://user:pass@host/db  │ ← Better, but:
+  │ API_KEY=sk-abc123...                         │   - No rotation
+  │                                              │   - No audit trail
+  │ Loaded via: python-dotenv or Docker env      │   - Shared via Slack 😬
+  └─────────────────────────────────────────────┘
+
+  Level 2: CLOUD PROVIDER SECRETS
+  ┌─────────────────────────────────────────────┐
+  │ AWS Secrets Manager / GCP Secret Manager     │
+  │ Kubernetes Secrets                           │ ← Good for small teams
+  │                                              │   - Automatic encryption
+  │ kubectl create secret generic db-creds \     │   - Basic rotation
+  │   --from-literal=password=P@ssw0rd123        │   - Cloud-native
+  └─────────────────────────────────────────────┘
+
+  Level 3: HASHICORP VAULT (Production-Grade)
+  ┌─────────────────────────────────────────────┐
+  │ Centralized secrets management               │
+  │                                              │ ← Enterprise-grade
+  │ Features:                                    │   - Dynamic secrets
+  │   ✓ Dynamic secrets (generated per-request)  │   - Automatic rotation
+  │   ✓ Automatic rotation                       │   - Full audit log
+  │   ✓ Fine-grained ACL policies                │   - Encryption as a service
+  │   ✓ Full audit trail (who accessed what)     │   - Multi-cloud
+  │   ✓ Encryption as a Service                  │
+  │   ✓ PKI certificate management               │
+  └─────────────────────────────────────────────┘
+```
+
+---
+
+## Vault Architecture
+
+```
+VAULT INTERNALS:
+
+  ┌──────────────────────────────────────────────────┐
+  │                  VAULT SERVER                     │
+  │                                                  │
+  │  ┌────────────────┐  ┌────────────────────┐      │
+  │  │ Auth Methods   │  │ Secrets Engines    │      │
+  │  │                │  │                    │      │
+  │  │ • Token        │  │ • KV (key-value)   │      │
+  │  │ • AppRole      │  │ • Database         │      │
+  │  │ • Kubernetes   │  │   (dynamic creds)  │      │
+  │  │ • AWS IAM      │  │ • PKI (TLS certs)  │      │
+  │  │ • LDAP/Okta    │  │ • Transit (encrypt)│      │
+  │  └────────────────┘  │ • SSH              │      │
+  │                      └────────────────────┘      │
+  │                                                  │
+  │  ┌────────────────┐  ┌────────────────────┐      │
+  │  │ Access Control │  │ Audit Logging      │      │
+  │  │                │  │                    │      │
+  │  │ Policies:      │  │ Every request      │      │
+  │  │ path "secret/  │  │ logged:            │      │
+  │  │   opspilot/*"  │  │ • Who (identity)   │      │
+  │  │ { read }       │  │ • What (path)      │      │
+  │  │                │  │ • When (timestamp)  │      │
+  │  └────────────────┘  │ • Result (allowed?) │      │
+  │                      └────────────────────┘      │
+  │                                                  │
+  │  ┌────────────────────────────────────────┐      │
+  │  │           STORAGE BACKEND              │      │
+  │  │  Consul / Raft / S3 / PostgreSQL       │      │
+  │  │  (encrypted at rest with master key)   │      │
+  │  └────────────────────────────────────────┘      │
+  └──────────────────────────────────────────────────┘
+
+DYNAMIC SECRETS — The Killer Feature:
+
+  Traditional:
+    Create DB password → Store in Vault → Application reads it
+    Problem: Password is static, if leaked it works forever
+
+  Dynamic Secrets:
+    Application requests DB access → Vault GENERATES a unique
+    username/password with a TTL (e.g., 1 hour) → On expiry,
+    Vault DELETES the credentials from the database
+
+  ┌─────────┐     ┌─────────┐     ┌─────────┐
+  │   App   │────►│  Vault  │────►│   DB    │
+  │         │     │         │     │         │
+  │ "I need │     │ Creates │     │ Creates │
+  │  DB     │     │ user:   │     │ user    │
+  │  access"│     │ v-app-  │     │ with    │
+  │         │◄────│ xyz123  │     │ limited │
+  │ Gets    │     │ TTL: 1h │     │ perms   │
+  │ creds   │     │         │     │         │
+  └─────────┘     └─────────┘     └─────────┘
+
+  After 1 hour: Vault automatically deletes v-app-xyz123 from DB
+  If credentials leak: they expire automatically!
+```
+
+---
+
+## Vault Integration with Python/FastAPI
+
+```python
+# ================================================================
+# VAULT CLIENT — Python Integration
+# ================================================================
+import hvac  # pip install hvac
+
+
+class VaultClient:
+    """
+    Production Vault client for OpsPilot.
+    
+    Authentication methods:
+      - Token:       Simple, good for development
+      - AppRole:     Machine-to-machine, production standard
+      - Kubernetes:  K8s service account, zero-config in pods
+    """
+    
+    def __init__(self, vault_url: str = "https://vault.company.com:8200"):
+        self.client = hvac.Client(url=vault_url)
+    
+    def authenticate_approle(self, role_id: str, secret_id: str):
+        """AppRole auth — best for production applications."""
+        self.client.auth.approle.login(
+            role_id=role_id,
+            secret_id=secret_id,
+        )
+    
+    def get_database_credentials(self) -> dict:
+        """
+        Get DYNAMIC database credentials.
+        Vault generates a unique username/password pair.
+        """
+        # Vault creates a temporary DB user with limited TTL
+        response = self.client.secrets.database.generate_credentials(
+            name="opspilot-db-role",
+        )
+        
+        return {
+            "username": response["data"]["username"],
+            "password": response["data"]["password"],
+            "ttl": response["lease_duration"],  # seconds until expiry
+            "lease_id": response["lease_id"],    # for renewal
+        }
+    
+    def get_static_secret(self, path: str) -> dict:
+        """Read a static secret from KV v2 engine."""
+        response = self.client.secrets.kv.v2.read_secret_version(
+            path=path,
+            mount_point="secret",
+        )
+        return response["data"]["data"]
+    
+    def encrypt_data(self, plaintext: str) -> str:
+        """
+        Encryption as a Service — Vault encrypts data for you.
+        Your application never handles encryption keys.
+        """
+        import base64
+        
+        encoded = base64.b64encode(plaintext.encode()).decode()
+        response = self.client.secrets.transit.encrypt_data(
+            name="opspilot-key",
+            plaintext=encoded,
+        )
+        return response["data"]["ciphertext"]
+
+
+# ================================================================
+# FASTAPI INTEGRATION
+# ================================================================
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+
+vault = VaultClient()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize Vault connection on startup."""
+    vault.authenticate_approle(
+        role_id=os.environ["VAULT_ROLE_ID"],
+        secret_id=os.environ["VAULT_SECRET_ID"],
+    )
+    
+    # Get initial secrets
+    db_creds = vault.get_database_credentials()
+    app.state.db_url = (
+        f"postgresql://{db_creds['username']}:"
+        f"{db_creds['password']}@db-host:5432/opspilot"
+    )
+    
+    yield  # App runs
+    
+    # Cleanup: revoke leases on shutdown
+
+app = FastAPI(lifespan=lifespan)
+```
+
+---
+
+### Interview Q: "How do you manage secrets in production?"
+
+> **Answer:** "We use a layered approach: (1) Development — `.env` files loaded by python-dotenv, never committed to Git (enforced by `.gitignore` and pre-commit hooks). (2) CI/CD — secrets stored in GitHub Actions encrypted secrets, injected as environment variables during pipeline runs. (3) Production — HashiCorp Vault provides centralized secrets management with dynamic database credentials (unique per-instance, auto-expiring). Applications authenticate to Vault via AppRole or Kubernetes service account, request secrets at runtime, and credentials are rotated automatically. Every secret access is audited. The key principle: secrets should be ephemeral (short-lived), unique (per-instance), and audited (who accessed what when)."
+
+---
+
+# ⏱️ RATE LIMITING — DEEP DIVE
+
+> **What:** Rate limiting restricts the number of requests a client can make in a
+> given time window, protecting your API from abuse, DDoS, and resource exhaustion.
+>
+> **Why:** Without rate limiting, a single user (or bot) can overwhelm your API,
+> degrade service for everyone, and rack up infrastructure costs.
+>
+> **Where:** At the API gateway or load balancer level (first line of defense),
+> and optionally at the application level for business logic limits.
+>
+> **When:** Always. Even internal APIs need rate limiting to prevent cascading failures.
+>
+> **How:** Track request counts per client (by IP, API key, or user ID) in a fast
+> data store (Redis), and return HTTP 429 (Too Many Requests) when limits are exceeded.
+
+---
+
+## Rate Limiting Algorithms
+
+```
+FOUR COMMON ALGORITHMS:
+
+  1. FIXED WINDOW COUNTER
+     ┌────────────────────────────────────────┐
+     │ Window: 1 minute, Limit: 100 requests  │
+     │                                         │
+     │ 12:00:00 ─── 12:01:00 ─── 12:02:00    │
+     │ [  count: 95  ] [  count: 0   ]        │
+     │                                         │
+     │ ✓ Simple to implement                   │
+     │ ✗ Burst at window boundary:             │
+     │   95 requests at 12:00:59 +             │
+     │   100 requests at 12:01:00 =            │
+     │   195 requests in 2 seconds! ← Problem  │
+     └────────────────────────────────────────┘
+
+  2. SLIDING WINDOW LOG
+     ┌────────────────────────────────────────┐
+     │ Keep timestamp of every request.        │
+     │ Count requests in the last N seconds.   │
+     │                                         │
+     │ ✓ Perfectly accurate                    │
+     │ ✗ Memory-intensive (stores all times)   │
+     └────────────────────────────────────────┘
+
+  3. SLIDING WINDOW COUNTER (Best for Most Cases)
+     ┌────────────────────────────────────────┐
+     │ Combines fixed window + weighted count  │
+     │ from previous window.                   │
+     │                                         │
+     │ Previous window: 80 requests            │
+     │ Current window:  30 requests            │
+     │ Current position: 25% through window    │
+     │                                         │
+     │ Weighted count = 80 × 0.75 + 30 = 90   │
+     │ Limit: 100 → Allowed!                   │
+     │                                         │
+     │ ✓ Smooth limiting, no boundary bursts   │
+     │ ✓ Memory efficient (just 2 counters)    │
+     └────────────────────────────────────────┘
+
+  4. TOKEN BUCKET (Best for Bursty Traffic)
+     ┌────────────────────────────────────────┐
+     │ Bucket starts with N tokens.            │
+     │ Each request consumes 1 token.          │
+     │ Tokens refill at rate R per second.     │
+     │                                         │
+     │ Bucket: 10 tokens, refill 1/sec         │
+     │                                         │
+     │ t=0: 10 tokens, 5 requests → 5 tokens  │
+     │ t=1: 6 tokens (5 + 1 refilled)         │
+     │ t=2: 7 tokens                           │
+     │ Burst of 7: 7 requests → 0 tokens      │
+     │ Next request: 429 Too Many Requests     │
+     │                                         │
+     │ ✓ Allows controlled bursts              │
+     │ ✓ Smooth average rate                   │
+     └────────────────────────────────────────┘
+```
+
+```python
+# ================================================================
+# REDIS-BACKED SLIDING WINDOW RATE LIMITER
+# ================================================================
+import time
+import redis
+
+
+class SlidingWindowRateLimiter:
+    """
+    Production-grade sliding window rate limiter using Redis.
+    
+    Why Redis?
+      - All instances share the same counter (distributed)
+      - Atomic operations (MULTI/EXEC) prevent race conditions
+      - Fast: ~0.1ms per check
+      - TTL-based cleanup (no manual garbage collection)
+    """
+    
+    def __init__(
+        self,
+        redis_client: redis.Redis,
+        max_requests: int = 100,
+        window_seconds: int = 60,
+    ):
+        self.redis = redis_client
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+    
+    def is_allowed(self, client_id: str) -> dict:
+        """
+        Check if a request is allowed under the rate limit.
+        
+        Uses Redis sorted set with timestamp as score:
+        - Add current timestamp
+        - Remove entries older than window
+        - Count remaining entries
+        """
+        key = f"rate_limit:{client_id}"
+        now = time.time()
+        window_start = now - self.window_seconds
+        
+        # Atomic pipeline (all-or-nothing)
+        pipe = self.redis.pipeline()
+        pipe.zremrangebyscore(key, 0, window_start)  # Remove old entries
+        pipe.zadd(key, {str(now): now})              # Add current request
+        pipe.zcard(key)                               # Count requests in window
+        pipe.expire(key, self.window_seconds)         # Auto-cleanup
+        results = pipe.execute()
+        
+        request_count = results[2]
+        
+        return {
+            "allowed": request_count <= self.max_requests,
+            "current_count": request_count,
+            "limit": self.max_requests,
+            "remaining": max(0, self.max_requests - request_count),
+            "reset_at": int(now + self.window_seconds),
+        }
+
+
+# ================================================================
+# FASTAPI MIDDLEWARE INTEGRATION
+# ================================================================
+from fastapi import Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        client_ip = request.client.host
+        limiter = SlidingWindowRateLimiter(redis_client, max_requests=100)
+        
+        result = limiter.is_allowed(client_ip)
+        
+        if not result["allowed"]:
+            return Response(
+                content='{"error": "Rate limit exceeded"}',
+                status_code=429,
+                headers={
+                    "X-RateLimit-Limit": str(result["limit"]),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(result["reset_at"]),
+                    "Retry-After": str(result["reset_at"] - int(time.time())),
+                },
+            )
+        
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(result["limit"])
+        response.headers["X-RateLimit-Remaining"] = str(result["remaining"])
+        return response
+```
+
+---
+
+### Interview Q: "How do you implement rate limiting?"
+
+> **Answer:** "We use a Redis-backed sliding window counter rate limiter. Each client is identified by IP or API key. We use Redis sorted sets where each entry is a timestamp — to check the rate, we remove entries older than the window, add the current timestamp, and count remaining entries. All operations are atomic via Redis pipeline. We return standard HTTP 429 with `X-RateLimit-Remaining` and `Retry-After` headers. Our limits are: 100 requests/minute for anonymous users, 1000/minute for authenticated users, and 10/minute for expensive operations like ML inference. The rate limiter runs as FastAPI middleware so it applies to all endpoints. For distributed deployments, Redis ensures all instances share the same counters."
+
+---
+
+# 🗂️ DATABASE MIGRATIONS (ALEMBIC) — DEEP DIVE
+
+> **What:** Alembic is a database migration tool for SQLAlchemy. It generates and
+> runs versioned migration scripts that evolve your database schema over time.
+>
+> **Why:** Production databases can't be dropped and recreated. You need to modify
+> schemas (add columns, rename tables, add indexes) without losing data, and you
+> need to do this in a reproducible, reversible, version-controlled way.
+>
+> **Where:** Between your SQLAlchemy/SQLModel definitions and the actual database.
+> Migrations are the bridge between "what your code expects" and "what the DB looks like."
+>
+> **When:** Every time your data model changes. Before deploying to production.
+> In CI/CD pipeline (run migrations before deploying new code).
+>
+> **How:** `alembic revision --autogenerate` detects model changes, `alembic upgrade head`
+> applies them, `alembic downgrade -1` rolls back one step.
+
+---
+
+## The Migration Lifecycle
+
+```
+MIGRATION WORKFLOW:
+
+  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+  │ 1. Change    │     │ 2. Generate  │     │ 3. Review    │
+  │ SQLModel     │────►│ Migration    │────►│ Migration    │
+  │ class        │     │ Script       │     │ (ALWAYS!)    │
+  │              │     │              │     │              │
+  │ class User:  │     │ alembic      │     │ Does it look │
+  │   email: str │     │   revision   │     │ correct?     │
+  │   +name: str │     │   --auto     │     │ Any data     │
+  │              │     │   -m "add    │     │ loss risk?   │
+  │              │     │    name"     │     │              │
+  └──────────────┘     └──────────────┘     └──────┬───────┘
+                                                    │
+                                                    ▼
+  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+  │ 6. Deploy    │     │ 5. Run in    │     │ 4. Test      │
+  │ new code     │◄────│ Production   │◄────│ locally      │
+  │              │     │              │     │              │
+  │ Code expects │     │ alembic      │     │ alembic      │
+  │ new schema   │     │   upgrade    │     │   upgrade    │
+  │              │     │   head       │     │   head       │
+  └──────────────┘     └──────────────┘     └──────────────┘
+
+  MIGRATION CHAIN (Linked List of Schema Changes):
+
+    abc123     →    def456     →    ghi789     →    jkl012
+    "create       "add email      "add name      "add index
+     users          column"        column"        on email"
+     table"
+    
+    Each migration has:
+      - upgrade(): Apply the change (forward)
+      - downgrade(): Undo the change (backward)
+      - Revision ID (unique hash)
+      - Link to previous revision (chain)
+```
+
+```python
+# ================================================================
+# ALEMBIC MIGRATION SCRIPT EXAMPLE
+# ================================================================
+# File: alembic/versions/ghi789_add_name_column.py
+#
+# Generated by: alembic revision --autogenerate -m "add name column"
+# Then REVIEWED and possibly edited by a human.
+
+"""add name column
+
+Revision ID: ghi789
+Revises: def456
+Create Date: 2024-01-15 10:30:00.000000
+"""
+from alembic import op
+import sqlalchemy as sa
+
+
+# Revision identifiers
+revision = "ghi789"
+down_revision = "def456"   # Previous migration in the chain
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    """
+    Forward migration — add the 'name' column.
+    
+    IMPORTANT: We use server_default to handle existing rows.
+    Without it, adding a NOT NULL column fails if table has data.
+    """
+    op.add_column(
+        "users",
+        sa.Column(
+            "name",
+            sa.String(length=255),
+            nullable=False,
+            server_default="",  # Existing rows get empty string
+        ),
+    )
+    
+    # After all existing rows have a value, remove the default
+    # (optional, depends on your requirements)
+    # op.alter_column("users", "name", server_default=None)
+
+
+def downgrade() -> None:
+    """
+    Backward migration — remove the 'name' column.
+    
+    ⚠️ WARNING: This is DESTRUCTIVE — data in 'name' column is lost.
+    In production, consider making downgrades that preserve data.
+    """
+    op.drop_column("users", "name")
+```
+
+```bash
+# ================================================================
+# ESSENTIAL ALEMBIC COMMANDS
+# ================================================================
+
+# Initialize Alembic in your project:
+alembic init alembic
+
+# Generate a migration from model changes:
+alembic revision --autogenerate -m "descriptive message"
+# ⚠️ ALWAYS review the generated script before running!
+
+# Apply all pending migrations:
+alembic upgrade head
+
+# Apply one migration forward:
+alembic upgrade +1
+
+# Rollback one migration:
+alembic downgrade -1
+
+# Rollback to a specific revision:
+alembic downgrade abc123
+
+# Show current migration state:
+alembic current
+
+# Show migration history:
+alembic history
+
+# Show pending (unapplied) migrations:
+alembic heads
+```
+
+---
+
+## Production Migration Best Practices
+
+```
+ZERO-DOWNTIME MIGRATION STRATEGY:
+
+  The key constraint: your OLD code and NEW code must both work
+  with the database during the migration window.
+
+  SAFE OPERATIONS (backwards-compatible):
+    ✓ Adding a new table
+    ✓ Adding a new NULLABLE column
+    ✓ Adding a new index (use CONCURRENTLY in PostgreSQL)
+    ✓ Adding a new column with a default value
+
+  UNSAFE OPERATIONS (may break old code):
+    ✗ Renaming a column (old code still references old name)
+    ✗ Dropping a column (old code still reads it)
+    ✗ Changing a column type
+    ✗ Adding NOT NULL without a default
+
+  HOW TO HANDLE UNSAFE OPERATIONS:
+
+    Example: Rename column 'name' → 'full_name'
+
+    WRONG (downtime):
+      Migration 1: ALTER TABLE users RENAME COLUMN name TO full_name;
+      Deploy: New code expects 'full_name' but old instances expect 'name'
+              → CRASH for old instances during rolling deployment
+
+    RIGHT (zero-downtime, 3-step):
+      Migration 1: ADD COLUMN full_name (keep 'name' too)
+                   Backfill: UPDATE users SET full_name = name
+      Deploy:      New code writes to BOTH columns, reads from full_name
+      Migration 2: DROP COLUMN name (old column)
+                   All code now uses full_name only
+
+    This takes 2 deployments but guarantees zero downtime.
+```
+
+---
+
+### Interview Q: "How do you handle database migrations?"
+
+> **Answer:** "We use Alembic with SQLModel/SQLAlchemy for schema migrations. The workflow is: (1) Modify the SQLModel class, (2) run `alembic revision --autogenerate` to generate a migration script, (3) manually review the script (auto-generation can miss renames or data transformations), (4) test locally, (5) run in CI before deployment, (6) deploy new code after migrations complete. All migrations are backwards-compatible — we only add nullable columns or columns with defaults. For breaking changes like column renames, we use a multi-step approach: add new column → backfill data → deploy code using both columns → drop old column. Every migration has both `upgrade()` and `downgrade()` functions for rollback capability. In production, we run migrations in CI/CD before the container deployment, with a manual approval gate."
+
+---
+
+# 🔥 DISASTER RECOVERY — DEEP DIVE
+
+> **What:** Disaster Recovery (DR) is a set of strategies and procedures to recover
+> infrastructure and data after catastrophic failures — data center outages, database
+> corruption, security breaches, or human error.
+>
+> **Why:** Even with high availability, disasters happen: AWS regions go down (us-east-1
+> has had multi-hour outages), databases get corrupted, someone accidentally drops a
+> production table. DR is your insurance policy.
+>
+> **Where:** Across all tiers — compute, storage, database, and application state.
+> DR planning must cover every critical component.
+>
+> **When:** Plan before disaster. Test regularly (monthly DR drills). Document runbooks
+> so anyone on-call can execute the recovery.
+>
+> **How:** Define RPO (how much data can you lose?) and RTO (how long can you be down?),
+> then build backup, replication, and failover strategies to meet those targets.
+
+---
+
+## RPO and RTO — The Two Key Metrics
+
+```
+RPO (Recovery Point Objective):
+  "How much DATA can we afford to lose?"
+
+  ┌─────────┐         ┌─────────┐         ┌─────────┐
+  │ Last    │         │ Disaster │         │ Recovery │
+  │ backup  │◄───────►│ happens  │◄───────►│ complete │
+  │         │  RPO    │  here    │  RTO    │          │
+  └─────────┘         └─────────┘         └─────────┘
+
+  RPO = 0:    Zero data loss (synchronous replication)
+  RPO = 1h:   Lose at most 1 hour of data (hourly backups)
+  RPO = 24h:  Lose at most 1 day (daily backups)
+
+RTO (Recovery Time Objective):
+  "How long can we be DOWN?"
+
+  RTO = 0:     No downtime (active-active, hot standby)
+  RTO = 15min: Back up in 15 minutes (warm standby)
+  RTO = 4h:    Acceptable for batch processing systems
+  RTO = 24h:   Acceptable for internal tools
+
+FOR OPSPILOT:
+  RPO = 1 hour (hourly database backups + WAL archiving)
+  RTO = 30 minutes (warm standby database + container auto-restart)
+
+
+DR STRATEGIES BY COST:
+
+  ┌────────────────────────────────────────────────────┐
+  │   Strategy        │  RPO    │  RTO     │  Cost     │
+  ├────────────────────────────────────────────────────┤
+  │   Backup/Restore  │  Hours  │  Hours   │  $        │
+  │   Pilot Light     │  Minutes│  ~30 min │  $$       │
+  │   Warm Standby    │  Seconds│  Minutes │  $$$      │
+  │   Active-Active   │  Zero   │  Zero    │  $$$$     │
+  └────────────────────────────────────────────────────┘
+
+  Backup/Restore:     Daily S3 backups. Restore from backup on failure.
+  Pilot Light:        Core services (DB, DNS) running in DR region.
+                      Scale up compute on failure.
+  Warm Standby:       Full environment running at reduced capacity.
+                      Scale up on failure.
+  Active-Active:      Full environment in 2+ regions serving traffic.
+                      DNS failover on failure. Zero downtime.
+```
+
+---
+
+## Database Backup Strategy
+
+```python
+# ================================================================
+# AUTOMATED BACKUP SCRIPT — PostgreSQL
+# ================================================================
+import subprocess
+import datetime
+import boto3
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class DatabaseBackupManager:
+    """
+    Production database backup strategy:
+    
+    1. Continuous WAL archiving  (RPO ≈ seconds)
+    2. Hourly logical backups     (RPO ≈ 1 hour)
+    3. Daily full backups          (RPO ≈ 24 hours)
+    4. Weekly offsite copy         (DR region)
+    
+    Retention:
+      Hourly: Keep 48 (2 days)
+      Daily:  Keep 30 (1 month)
+      Weekly: Keep 12 (3 months)
+    """
+    
+    def __init__(self, db_host: str, db_name: str, s3_bucket: str):
+        self.db_host = db_host
+        self.db_name = db_name
+        self.s3_bucket = s3_bucket
+        self.s3 = boto3.client("s3")
+    
+    def create_backup(self, backup_type: str = "hourly") -> str:
+        """Create a PostgreSQL backup using pg_dump."""
+        timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.db_name}_{backup_type}_{timestamp}.sql.gz"
+        
+        # pg_dump with compression
+        cmd = (
+            f"pg_dump -h {self.db_host} -U opspilot_admin "
+            f"-d {self.db_name} --format=custom "
+            f"--compress=9 -f /tmp/{filename}"
+        )
+        
+        result = subprocess.run(cmd, shell=True, capture_output=True)
+        
+        if result.returncode != 0:
+            logger.error(f"Backup failed: {result.stderr.decode()}")
+            raise RuntimeError("Database backup failed")
+        
+        # Upload to S3
+        s3_key = f"backups/{backup_type}/{filename}"
+        self.s3.upload_file(f"/tmp/{filename}", self.s3_bucket, s3_key)
+        
+        # Cross-region copy for DR
+        if backup_type == "weekly":
+            self.s3.copy_object(
+                CopySource={"Bucket": self.s3_bucket, "Key": s3_key},
+                Bucket=f"{self.s3_bucket}-dr",  # DR region bucket
+                Key=s3_key,
+            )
+        
+        logger.info(f"Backup complete: {s3_key}")
+        return s3_key
+    
+    def cleanup_old_backups(self):
+        """Remove backups beyond retention period."""
+        retention = {
+            "hourly": 48,
+            "daily": 30,
+            "weekly": 12,
+        }
+        
+        for backup_type, keep_count in retention.items():
+            prefix = f"backups/{backup_type}/"
+            objects = self.s3.list_objects_v2(
+                Bucket=self.s3_bucket, Prefix=prefix
+            )
+            
+            if "Contents" in objects:
+                sorted_objects = sorted(
+                    objects["Contents"],
+                    key=lambda x: x["LastModified"],
+                    reverse=True,
+                )
+                
+                # Delete objects beyond retention
+                for obj in sorted_objects[keep_count:]:
+                    self.s3.delete_object(
+                        Bucket=self.s3_bucket,
+                        Key=obj["Key"],
+                    )
+                    logger.info(f"Deleted old backup: {obj['Key']}")
+```
+
+---
+
+### Interview Q: "What's your disaster recovery strategy?"
+
+> **Answer:** "Our DR strategy is based on RPO of 1 hour and RTO of 30 minutes: (1) Database — continuous WAL (Write-Ahead Log) archiving to S3 for point-in-time recovery (RPO ≈ seconds). Hourly logical backups, daily full backups, and weekly offsite copies to a DR region. (2) Application — stateless, containerized API behind a load balancer. Container restart is automatic via Kubernetes restart policy. Application state is in PostgreSQL and Redis, not in containers. (3) Infrastructure — defined in Terraform (Infrastructure as Code), so the entire stack can be recreated in a new region within 30 minutes. (4) Model artifacts — stored in S3 with cross-region replication, also tracked in MLflow registry. (5) Runbooks — documented step-by-step recovery procedures for each failure scenario, tested in monthly DR drills. The key principle is: make everything reproducible (IaC, containerization, version-controlled data) so recovery is a matter of running scripts, not heroics."
+
+---
+
 # 🎯 COMPREHENSIVE INTERVIEW CHEAT SHEET
 
 > **Use this section for rapid review before an interview. One answer per question, maximally concise.**
