@@ -1,6 +1,7 @@
 """API contract tests: verify every endpoint returns correct schemas."""
 
 from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
 from opspilot.api.main import app

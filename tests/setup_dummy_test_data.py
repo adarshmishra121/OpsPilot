@@ -1,7 +1,8 @@
 import json
 import os
-import numpy as np
+
 import faiss
+import numpy as np
 
 # Create dummy anomaly vocab
 os.makedirs("artifacts", exist_ok=True)

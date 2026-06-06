@@ -7,8 +7,8 @@ import pandas as pd
 import structlog
 
 try:
-    from evidently.report import Report
     from evidently.metric_preset import DataDriftPreset
+    from evidently.report import Report
 except ImportError:
     Report = None
     DataDriftPreset = None

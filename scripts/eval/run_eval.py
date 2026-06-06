@@ -4,9 +4,9 @@ import json
 import sys
 from pathlib import Path
 
-from opspilot.rag.retriever import HybridRetriever
-from opspilot.rag.index import FaissStore
 from opspilot.rag.docstore import DocStore
+from opspilot.rag.index import FaissStore
+from opspilot.rag.retriever import HybridRetriever
 
 GOLD_PATH = Path("data/eval/rag_gold.jsonl")
 INDEX_PATH = "artifacts/vector_index"

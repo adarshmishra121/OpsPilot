@@ -39,7 +39,7 @@ def clear_cache():
     except Exception:
         pass
     try:
-        from opspilot.anomaly.infer import _load_model, _get_featurizer
+        from opspilot.anomaly.infer import _get_featurizer, _load_model
 
         _load_model.cache_clear()
         _get_featurizer.cache_clear()
