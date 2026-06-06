@@ -1,7 +1,7 @@
 """OpsPilot — Incident Response Console (Streamlit UI)."""
 
-import streamlit as st
 import httpx
+import streamlit as st
 
 API_URL = "http://localhost:8000"
 
@@ -18,7 +18,11 @@ with st.sidebar:
     environment = st.text_input("Environment", value="production")
     log_lines_raw = st.text_area(
         "Log Lines (one per line)",
-        value="ERROR disk usage at 95% on /dev/sda1\nWARN inode count critical on node-42\nERROR write failed: no space left on device",
+        value=(
+            "ERROR disk usage at 95% on /dev/sda1\n"
+            "WARN inode count critical on node-42\n"
+            "ERROR write failed: no space left on device"
+        ),
         height=200,
     )
     analyze_btn = st.button("🔍 Analyze Incident", type="primary", use_container_width=True)
@@ -26,7 +30,7 @@ with st.sidebar:
 # ── Main Area: Results ────────────────────────────────────────
 
 if analyze_btn:
-    log_lines = [l.strip() for l in log_lines_raw.strip().split("\n") if l.strip()]
+    log_lines = [line.strip() for line in log_lines_raw.strip().split("\n") if line.strip()]
 
     payload = {
         "incident_id": incident_id,
@@ -71,7 +75,10 @@ if analyze_btn:
     with tab2:
         st.subheader("Retrieved Runbook Chunks")
         for i, chunk in enumerate(data.get("retrieved_context", [])):
-            with st.expander(f"#{i+1} — {chunk.get('doc_id', 'unknown')} (score: {chunk.get('score', 0):.3f})"):
+            doc_id = chunk.get("doc_id", "unknown")
+            score_val = chunk.get("score", 0)
+            label = f"#{i+1} — {doc_id} (score: {score_val:.3f})"
+            with st.expander(label):
                 st.markdown(chunk.get("text", ""))
 
     with tab3:
