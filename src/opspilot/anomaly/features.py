@@ -21,6 +21,7 @@ class LogFeaturizer:
         vocab_path = vocab_path or os.getenv(
             "VOCAB_PATH", "artifacts/anomaly_vocab.json"
         )
+        assert vocab_path is not None
         with open(vocab_path, "r") as f:
             self.vocab: List[int] = json.load(f)
         self._vocab_set = set(self.vocab)

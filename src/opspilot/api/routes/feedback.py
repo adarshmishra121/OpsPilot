@@ -28,4 +28,4 @@ def submit_feedback(
     session.add(row)
     session.commit()
     session.refresh(row)
-    return FeedbackResponse(id=row.id, status="saved")
+    return FeedbackResponse(id=row.id or 0, status="saved")

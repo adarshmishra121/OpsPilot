@@ -23,9 +23,11 @@ class FaissStore:
     def load(self) -> "FaissStore":
         """Load an existing index from disk, or initialise an empty one."""
         if os.path.exists(self.faiss_file):
-            self._index = faiss.read_index(self.faiss_file)
+            self._index = faiss.read_index(self.faiss_file)  # type: ignore[assignment]
         else:
-            self._index = faiss.IndexFlatIP(self.embedder.dim)
+            dim = self.embedder.dim
+            assert dim is not None
+            self._index = faiss.IndexFlatIP(dim)
 
         if os.path.exists(self.meta_file):
             with open(self.meta_file, "r", encoding="utf-8") as f:

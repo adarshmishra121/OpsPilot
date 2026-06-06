@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List, TypedDict
 
 from langgraph.graph import END, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from opspilot.agent.prompts import SYSTEM_PROMPT
 from opspilot.agent.safety import validate_grounded_actions
@@ -96,7 +97,7 @@ def validate_node(state: AgentState) -> dict:
 # ── Graph assembly ────────────────────────────────────────────
 
 
-def build_graph() -> StateGraph:
+def build_graph() -> CompiledStateGraph:
     """Construct the LangGraph agent pipeline."""
     graph = StateGraph(AgentState)
 
