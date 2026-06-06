@@ -1,0 +1,68 @@
+name: Latency Report
+
+on:
+  schedule:
+    # Run every day at 08:00 UTC
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+jobs:
+  latency-check:
+    name: P95 Latency Smoke Test
+    runs-on: ubuntu-latest
+    env:
+      LLM_PROVIDER: mock
+      PYTHONPATH: src
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -e ".[api,ui]" httpx pytest
+
+      - name: Create dummy artifacts
+        run: python tests/setup_dummy_test_data.py
+
+      - name: Start API in background
+        run: |
+          nohup uvicorn opspilot.api.main:app --host 0.0.0.0 --port 8000 &
+          sleep 4
+
+      - name: P95 latency smoke test (10 requests)
+        run: |
+          python - <<'EOF'
+          import httpx, time, statistics, sys
+
+          URL = "http://localhost:8000/incident/analyze"
+          PAYLOAD = {
+              "incident_id": "CI-LATENCY-001",
+              "alert_title": "NodeDiskRunningFull",
+              "service": "payment-api",
+              "log_lines": ["ERROR disk at 95%", "WARN inode exhaustion"],
+          }
+
+          latencies = []
+          for i in range(10):
+              t0 = time.perf_counter()
+              r = httpx.post(URL, json=PAYLOAD, timeout=30)
+              r.raise_for_status()
+              latencies.append(time.perf_counter() - t0)
+
+          latencies.sort()
+          p50 = statistics.median(latencies)
+          p95 = latencies[int(len(latencies) * 0.95)]
+          p99 = latencies[-1]
+
+          print(f"P50: {p50*1000:.0f}ms  P95: {p95*1000:.0f}ms  P99: {p99*1000:.0f}ms")
+
+          THRESHOLD_P95_MS = 2000
+          if p95 * 1000 > THRESHOLD_P95_MS:
+              print(f"FAIL: P95 {p95*1000:.0f}ms > {THRESHOLD_P95_MS}ms threshold")
+              sys.exit(1)
+          print("PASS: latency within threshold")
+          EOF

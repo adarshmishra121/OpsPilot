@@ -16,8 +16,8 @@ INDEX_PATH = os.getenv("VECTOR_INDEX_PATH", "artifacts/vector_index")
 META_PATH = os.path.join(INDEX_PATH, "meta.jsonl")
 ALPHA = float(os.getenv("HYBRID_ALPHA", "0.6"))
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "mock")
-OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b-instruct-q4_K_M")
+OLLAMA_BASE = os.getenv("OLLAMA_HOST", os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
 
 @lru_cache
@@ -39,18 +39,36 @@ def anomaly_score(log_lines: List[str]) -> Dict[str, Any]:
     return score_logs(log_lines)
 
 
-def call_llm(prompt: str) -> str:
+def call_llm(prompt: str, retries: int = 3, retry_delay: float = 30.0) -> str:
     """Call the configured LLM provider (mock or Ollama)."""
     if LLM_PROVIDER == "mock":
         return _mock_response()
 
-    resp = httpx.post(
-        f"{OLLAMA_BASE}/api/generate",
-        json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-        timeout=120.0,
-    )
-    resp.raise_for_status()
-    return resp.json()["response"]
+    import time
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            # Stream tokens to avoid hard response timeout on slow CPU inference
+            chunks = []
+            with httpx.stream(
+                "POST",
+                f"{OLLAMA_BASE}/api/generate",
+                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": True},
+                timeout=httpx.Timeout(connect=10.0, read=1800.0, write=10.0, pool=10.0),
+            ) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if line:
+                        data = json.loads(line)
+                        chunks.append(data.get("response", ""))
+                        if data.get("done"):
+                            break
+            return "".join(chunks)
+        except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(retry_delay)
+    raise RuntimeError(f"Ollama call failed after {retries} attempts") from last_exc
 
 
 def _mock_response() -> str:

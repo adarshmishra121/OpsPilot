@@ -16,18 +16,18 @@ Analyze the incident and produce a structured JSON response.
 
 ## Output Format
 Return ONLY valid JSON matching this schema:
-{
+{{
     "summary": "One-paragraph incident summary",
     "actions": [
-        {
+        {{
             "action": "Specific remediation step",
             "evidence_doc_ids": ["runbook:NodeDiskRunningFull:2"]
-        }
+        }}
     ],
     "verification_steps": ["Step to verify the fix worked"],
     "fallback_plan": ["What to do if primary fix fails"],
     "postmortem_markdown": "## Incident Summary\\n..."
-}
+}}
 
 ## Context
 - Anomaly score: {anomaly_score} (0=normal, 1=critical)

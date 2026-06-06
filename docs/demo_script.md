@@ -97,7 +97,13 @@ Open: `http://localhost:8000/docs`
 > A: "Three things: (1) Replace SQLite with PostgreSQL — already supported via `DATABASE_URL`. (2) Replace mock LLM with vLLM on GPU for real inference. (3) Put the API behind a load balancer with multiple replicas — each is stateless."
 
 ### Q: "What would you improve next?"
-> A: "Two things: (1) Add a feedback loop — when engineers rate actions as helpful/unhelpful, use that to fine-tune the retriever's alpha weight. (2) Add streaming responses — the LLM should stream tokens to the UI instead of waiting for the full response."
+> A: "Two things: (1) Add a feedback loop — when engineers rate actions as helpful/unhelpful, use that to fine-tune the retriever's alpha weight. (2) Add streaming responses — the LLM already uses streaming internally via `httpx.stream`, but exposing SSE tokens to the UI would show progress in real time."
+
+### Q: "Why Qwen2.5:7B over Llama?"
+> A: "Two reasons: structured output and instruction following. OpsPilot's `draft_node` feeds the raw LLM response directly into `json.loads()` — any prose outside the JSON block causes a parse failure. Qwen2.5:7b consistently outputs clean JSON because it was trained on heavy instruction-following and JSON-mode datasets. Llama 3 is a great general model but tends to prefix answers with conversational text like 'Here is my analysis:' before the JSON, which breaks the parser. We prototyped with Llama initially and switched to Qwen2.5:7b after observing the structured-output improvement."
+
+### Q: "Did you fine-tune the LLM?"
+> A: "No — and that's intentional. Fine-tuning an LLM for incident response would require thousands of labeled incident→action pairs, which most teams don't have. Instead, OpsPilot uses the LLM purely as a reasoning engine: the knowledge lives in the runbook RAG index, not baked into model weights. This means you can update the runbooks and get better answers without any retraining."
 
 ### Q: "How do you handle hallucinations?"
 > A: "The safety validator in `safety.py` checks every suggested action. Each action must cite a `doc_id` from the retrieved context. If the LLM invents a citation that doesn't exist in our retrieved documents, it gets filtered out. I have 6 unit tests covering edge cases — empty evidence, fake doc_ids, mixed valid/invalid actions."

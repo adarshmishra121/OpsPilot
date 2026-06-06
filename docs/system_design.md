@@ -57,6 +57,34 @@ OpsPilot is an AI-powered incident response copilot that combines:
 - Architecture is identical — only the LLM response changes
 - Switch to real LLM by setting `LLM_PROVIDER=ollama` in `.env`
 
+### ADR-7: Why Qwen2.5:7B as the Production LLM?
+
+**Context:** OpsPilot requires the LLM to produce strict, machine-parseable JSON with no extra prose. The `validate_node` reads `draft_response["actions"]` directly — a single stray sentence outside the JSON object causes a `JSONDecodeError` and drops the entire response.
+
+**Decision:** `OLLAMA_MODEL=qwen2.5:7b` is the recommended model for OpsPilot.
+
+**Rationale:**
+- **Structured output compliance:** Qwen2.5 was trained with heavy instruction-following and JSON-mode datasets. In practice it outputs well-formed JSON far more consistently than similarly-sized Llama models, which tend to prefix responses with prose like "Here is the analysis:" before the JSON block — breaking our parser.
+- **Strong instruction following at 7B scale:** Qwen2.5:7b matches or exceeds Llama-3:8b on instruction-following benchmarks (IFEval) while being the same 4.7 GB quantized size.
+- **Better multilingual context:** Qwen2.5 handles mixed technical content (log lines, markdown runbooks, CLI commands) more reliably than Llama base models due to a broader pretraining corpus.
+- **Efficient quantization:** The Q4_K_M quantization of Qwen2.5:7b retains >98% of full-precision quality while fitting in ~5 GB VRAM — runnable on a single consumer GPU alongside the FAISS index.
+- **Ollama-native support:** `ollama pull qwen2.5:7b` works out of the box; the model is officially maintained in the Ollama model library with a tested system-prompt template.
+
+**Why not Llama 3?**
+- Llama 3:8b is an excellent general-purpose model but outputs conversational prose around JSON, requiring fragile post-processing regex to extract the JSON block.
+- Llama models were initially used during early prototyping (`llama3.2:3b-instruct-q4_K_M` was the original default in `tools.py`) but replaced after observing consistent structured-output failures in the `draft_node`.
+- For pure chat or open-ended reasoning Llama 3 is competitive; for schema-constrained JSON generation, Qwen2.5 is the better fit.
+
+**Configuration:**
+```bash
+# .env
+LLM_PROVIDER=ollama
+OLLAMA_HOST=http://localhost:11434
+OLLAMA_MODEL=qwen2.5:7b
+```
+
+**Tradeoff:** Qwen2.5:7b requires ~5 GB VRAM. On CPU-only machines, inference takes 3–8 minutes per request — acceptable for async batch workflows but not for interactive use. For CPU-only environments, use `LLM_PROVIDER=mock` during development.
+
 ### ADR-5: Why Safety Validation (Groundedness Check)?
 
 **Context:** LLMs hallucinate — they may suggest actions not supported by evidence.

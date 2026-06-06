@@ -61,8 +61,17 @@ def draft_node(state: AgentState) -> dict:
     )
     raw = call_llm(prompt)
 
+    # Strip markdown code fences if model wrapped JSON in ```json ... ```
+    stripped = raw.strip()
+    if stripped.startswith("```") and stripped.count("```") >= 2:
+        start = stripped.index("```") + 3
+        end = stripped.rindex("```")
+        stripped = stripped[start:end].strip()
+        if stripped.startswith("json"):
+            stripped = stripped[4:].strip()
+
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(stripped)
     except json.JSONDecodeError:
         parsed = {
             "summary": raw,

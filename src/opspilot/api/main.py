@@ -4,6 +4,10 @@ OpsPilot API — application entry point.
 Start with: uvicorn opspilot.api.main:app --reload --port 8000
 """
 
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parents[3] / ".env")
+
 from fastapi import FastAPI
 
 from opspilot.api.routes.health import router as health_router
