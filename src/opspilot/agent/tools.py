@@ -8,9 +8,9 @@ from typing import Any, Dict, List
 import httpx
 
 from opspilot.anomaly.infer import score_logs
-from opspilot.rag.retriever import HybridRetriever
-from opspilot.rag.index import FaissStore
 from opspilot.rag.docstore import DocStore
+from opspilot.rag.index import FaissStore
+from opspilot.rag.retriever import HybridRetriever
 
 INDEX_PATH = os.getenv("VECTOR_INDEX_PATH", "artifacts/vector_index")
 META_PATH = os.path.join(INDEX_PATH, "meta.jsonl")

@@ -9,7 +9,6 @@ from opspilot.agent.prompts import SYSTEM_PROMPT
 from opspilot.agent.safety import validate_grounded_actions
 from opspilot.agent.tools import anomaly_score, call_llm, retrieve_runbooks
 
-
 # ── State schema ──────────────────────────────────────────────
 
 

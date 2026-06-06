@@ -5,17 +5,19 @@ Start with: uvicorn opspilot.api.main:app --reload --port 8000
 """
 
 from pathlib import Path
+
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).parents[3] / ".env")
 
 from fastapi import FastAPI
 
+from opspilot.api.routes.admin import router as admin_router
+from opspilot.api.routes.anomaly import router as anomaly_router
+from opspilot.api.routes.feedback import router as feedback_router
 from opspilot.api.routes.health import router as health_router
 from opspilot.api.routes.incident import router as incident_router
 from opspilot.api.routes.rag import router as rag_router
-from opspilot.api.routes.anomaly import router as anomaly_router
-from opspilot.api.routes.feedback import router as feedback_router
-from opspilot.api.routes.admin import router as admin_router
 from opspilot.observability.logging import configure_logging
 from opspilot.observability.metrics import instrument_app
 
