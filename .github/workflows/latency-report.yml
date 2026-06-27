@@ -1,10 +1,7 @@
 name: Latency Report
 
 on:
-  schedule:
-    # Run every day at 08:00 UTC
-    - cron: "0 8 * * *"
-  workflow_dispatch:
+  workflow_dispatch:  # manual trigger only — scheduled run disabled
 
 jobs:
   latency-check:
