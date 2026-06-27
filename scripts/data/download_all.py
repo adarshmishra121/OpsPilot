@@ -24,14 +24,13 @@ def ensure_repo(url: str, dst: Path) -> None:
 
 
 def copy_loghub_subset(loghub_path: Path) -> None:
-    """Copy HDFS log file from the cloned loghub repo into data/raw/."""
+    """Copy HDFS log and anomaly labels from the cloned loghub repo into data/raw/."""
     hdfs_dir = RAW / "hdfs"
     hdfs_dir.mkdir(parents=True, exist_ok=True)
 
     # Loghub stores logs in <Dataset>/<Dataset>.log format
     src = loghub_path / "HDFS" / "HDFS.log"
     if not src.exists():
-        # Some loghub versions use HDFS_1/ or HDFS_v1/
         candidates = list(loghub_path.glob("HDFS*/*.log"))
         if candidates:
             src = candidates[0]
@@ -45,6 +44,23 @@ def copy_loghub_subset(loghub_path: Path) -> None:
         print(f"Copied {src} → {dst}")
     else:
         print(f"Already exists: {dst}")
+
+    # Also copy anomaly labels — needed for F1/precision/recall evaluation
+    label_src = src.parent / "anomaly_label.csv"
+    if not label_src.exists():
+        # Try alternate names used by different loghub versions
+        for candidate in src.parent.glob("*label*"):
+            label_src = candidate
+            break
+    if label_src.exists():
+        label_dst = hdfs_dir / "anomaly_label.csv"
+        if not label_dst.exists():
+            shutil.copy2(label_src, label_dst)
+            print(f"Copied anomaly labels {label_src} → {label_dst}")
+        else:
+            print(f"Already exists: {label_dst}")
+    else:
+        print("WARNING: anomaly_label.csv not found — F1/precision/recall will be skipped")
 
 
 def copy_runbooks(runbooks_path: Path) -> None:

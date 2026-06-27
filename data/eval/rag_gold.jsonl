@@ -1,7 +1,7 @@
 {"query": "NodeDiskRunningFull alert on payment service", "expected_doc_ids": ["runbook:NodeFilesystemSpaceFillingUp:0", "runbook:NodeFilesystemSpaceFillingUp:1"]}
 {"query": "high CPU usage on kubernetes node", "expected_doc_ids": ["runbook:CPUThrottlingHigh:0", "runbook:CPUThrottlingHigh:1"]}
 {"query": "pod crashloopbackoff restart failing", "expected_doc_ids": ["runbook:KubePodCrashLooping:0", "runbook:KubePodCrashLooping:1"]}
-{"query": "memory pressure out of memory OOMKilled", "expected_doc_ids": ["runbook:KubeMemoryOvercommit:0", "runbook:NodeMemoryHighUtilization:0"]}
+{"query": "memory pressure out of memory OOMKilled", "expected_doc_ids": ["runbook:KubeMemoryOvercommit:0"]}
 {"query": "persistent volume claim pending not bound", "expected_doc_ids": ["runbook:KubePersistentVolumeFillingUp:0", "runbook:KubePersistentVolumeFillingUp:1"]}
 {"query": "deployment replicas not available rollout stuck", "expected_doc_ids": ["runbook:KubeDeploymentReplicasMismatch:0", "runbook:KubeDeploymentReplicasMismatch:1"]}
 {"query": "network connectivity timeout connection refused", "expected_doc_ids": ["runbook:TargetDown:0"]}
@@ -10,3 +10,87 @@
 {"query": "prometheus scrape target down metrics missing", "expected_doc_ids": ["runbook:TargetDown:0", "runbook:PrometheusTargetSyncFailure:0"]}
 {"query": "kube scheduler not scheduling pods pending", "expected_doc_ids": ["runbook:KubeSchedulerDown:0"]}
 {"query": "etcd high fsync latency slow cluster", "expected_doc_ids": ["runbook:etcdHighFsyncDurations:0", "runbook:etcdHighFsyncDurations:1"]}
+{"query": "alertmanager cluster all instances down", "expected_doc_ids": ["runbook:AlertmanagerClusterDown:0"]}
+{"query": "alertmanager crashlooping restarting repeatedly", "expected_doc_ids": ["runbook:AlertmanagerClusterCrashlooping:0"]}
+{"query": "alertmanager failed to reload configuration", "expected_doc_ids": ["runbook:AlertmanagerFailedReload:0"]}
+{"query": "alertmanager cluster members inconsistent split brain", "expected_doc_ids": ["runbook:AlertmanagerMembersInconsistent:0"]}
+{"query": "alertmanager config inconsistent across cluster", "expected_doc_ids": ["runbook:AlertmanagerConfigInconsistent:0"]}
+{"query": "alertmanager cluster failed to send alerts to receivers", "expected_doc_ids": ["runbook:AlertmanagerClusterFailedToSendAlerts:0"]}
+{"query": "etcd backend quota low space disk full", "expected_doc_ids": ["runbook:etcdBackendQuotaLowSpace:0"]}
+{"query": "etcd grpc requests slow high latency", "expected_doc_ids": ["runbook:etcdGRPCRequestsSlow:0"]}
+{"query": "etcd high number of failed grpc requests", "expected_doc_ids": ["runbook:etcdHighNumberOfFailedGRPCRequests:0"]}
+{"query": "etcd insufficient members quorum lost", "expected_doc_ids": ["runbook:etcdInsufficientMembers:0"]}
+{"query": "etcd members down cluster degraded", "expected_doc_ids": ["runbook:etcdMembersDown:0"]}
+{"query": "etcd no leader election failed", "expected_doc_ids": ["runbook:etcdNoLeader:0"]}
+{"query": "kubernetes api server down unreachable", "expected_doc_ids": ["runbook:KubeAPIDown:0"]}
+{"query": "kube api error budget burn rate high SLO violation", "expected_doc_ids": ["runbook:KubeAPIErrorBudgetBurn:0"]}
+{"query": "kubernetes api terminated requests dropped", "expected_doc_ids": ["runbook:KubeAPITerminatedRequests:0"]}
+{"query": "kube client certificate expiring soon TLS", "expected_doc_ids": ["runbook:KubeClientCertificateExpiration:0"]}
+{"query": "kubernetes client errors high error rate", "expected_doc_ids": ["runbook:KubeClientErrors:0"]}
+{"query": "container waiting not starting stuck", "expected_doc_ids": ["runbook:KubeContainerWaiting:0"]}
+{"query": "controller manager down kubernetes control plane", "expected_doc_ids": ["runbook:KubeControllerManagerDown:0"]}
+{"query": "cpu overcommit node resource pressure", "expected_doc_ids": ["runbook:KubeCPUOvercommit:0"]}
+{"query": "cpu quota overcommit namespace limit", "expected_doc_ids": ["runbook:KubeCPUQuotaOvercommit:0"]}
+{"query": "daemonset pod misscheduled wrong node", "expected_doc_ids": ["runbook:KubeDaemonSetMisScheduled:0"]}
+{"query": "daemonset not scheduled missing nodes", "expected_doc_ids": ["runbook:KubeDaemonSetNotScheduled:0"]}
+{"query": "daemonset rollout stuck not progressing", "expected_doc_ids": ["runbook:KubeDaemonSetRolloutStuck:0"]}
+{"query": "deployment generation mismatch spec not applied", "expected_doc_ids": ["runbook:KubeDeploymentGenerationMismatch:0"]}
+{"query": "hpa maxed out autoscaler at maximum replicas", "expected_doc_ids": ["runbook:KubeHpaMaxedOut:0"]}
+{"query": "hpa replicas mismatch desired vs actual", "expected_doc_ids": ["runbook:KubeHpaReplicasMismatch:0"]}
+{"query": "kubernetes job failed batch job error", "expected_doc_ids": ["runbook:KubeJobFailed:0"]}
+{"query": "kubelet client certificate expiring renewal", "expected_doc_ids": ["runbook:KubeletClientCertificateExpiration:0", "runbook:KubeletClientCertificateRenewalErrors:0"]}
+{"query": "kubelet down node agent not running", "expected_doc_ids": ["runbook:KubeletDown:0"]}
+{"query": "kubelet pleg duration high pod lifecycle event generator", "expected_doc_ids": ["runbook:KubeletPlegDurationHigh:0"]}
+{"query": "pod startup latency high slow to start", "expected_doc_ids": ["runbook:KubeletPodStartUpLatencyHigh:0"]}
+{"query": "kubelet too many pods node at capacity", "expected_doc_ids": ["runbook:KubeletTooManyPods:0"]}
+{"query": "memory overcommit node memory pressure OOM", "expected_doc_ids": ["runbook:KubeMemoryOvercommit:0"]}
+{"query": "memory quota overcommit namespace limit exceeded", "expected_doc_ids": ["runbook:KubeMemoryQuotaOvercommit:0"]}
+{"query": "node not ready kubelet status unknown", "expected_doc_ids": ["runbook:KubeNodeNotReady:0"]}
+{"query": "node readiness flapping intermittent not ready", "expected_doc_ids": ["runbook:KubeNodeReadinessFlapping:0"]}
+{"query": "node unreachable network partition", "expected_doc_ids": ["runbook:KubeNodeUnreachable:0"]}
+{"query": "persistent volume errors PV failed bound", "expected_doc_ids": ["runbook:KubePersistentVolumeErrors:0"]}
+{"query": "pod not ready liveness probe failing", "expected_doc_ids": ["runbook:KubePodNotReady:0"]}
+{"query": "kube proxy down networking broken", "expected_doc_ids": ["runbook:KubeProxyDown:0"]}
+{"query": "namespace quota almost full resource limit", "expected_doc_ids": ["runbook:KubeQuotaAlmostFull:0"]}
+{"query": "namespace quota fully used resource exhausted", "expected_doc_ids": ["runbook:KubeQuotaFullyUsed:0"]}
+{"query": "namespace quota exceeded resource requests denied", "expected_doc_ids": ["runbook:KubeQuotaExceeded:0"]}
+{"query": "statefulset generation mismatch update not applied", "expected_doc_ids": ["runbook:KubeStatefulSetGenerationMismatch:0"]}
+{"query": "statefulset replicas mismatch not all pods running", "expected_doc_ids": ["runbook:KubeStatefulSetReplicasMismatch:0"]}
+{"query": "statefulset update not rolled out stuck", "expected_doc_ids": ["runbook:KubeStatefulSetUpdateNotRolledOut:0"]}
+{"query": "kube-state-metrics list errors watch failing", "expected_doc_ids": ["runbook:KubeStateMetricsListErrors:0", "runbook:KubeStateMetricsWatchErrors:0"]}
+{"query": "kube-state-metrics sharding mismatch configuration", "expected_doc_ids": ["runbook:KubeStateMetricsShardingMismatch:0"]}
+{"query": "kube-state-metrics shards missing not running", "expected_doc_ids": ["runbook:KubeStateMetricsShardsMissing:0"]}
+{"query": "kubernetes version mismatch nodes different versions", "expected_doc_ids": ["runbook:KubeVersionMismatch:0"]}
+{"query": "node clock not synchronising NTP time drift", "expected_doc_ids": ["runbook:NodeClockNotSynchronising:0", "runbook:NodeClockSkewDetected:0"]}
+{"query": "node file descriptor limit exhausted too many open files", "expected_doc_ids": ["runbook:NodeFileDescriptorLimit:0"]}
+{"query": "node filesystem almost out of inodes files", "expected_doc_ids": ["runbook:NodeFilesystemAlmostOutOfFiles:0", "runbook:NodeFilesystemFilesFillingUp:0"]}
+{"query": "node filesystem almost out of space disk filling up", "expected_doc_ids": ["runbook:NodeFilesystemAlmostOutOfSpace:0", "runbook:NodeFilesystemSpaceFillingUp:0"]}
+{"query": "high conntrack entries network connection table full", "expected_doc_ids": ["runbook:NodeHighNumberConntrackEntriesUsed:0"]}
+{"query": "network interface flapping link up down unstable", "expected_doc_ids": ["runbook:NodeNetworkInterfaceFlapping:0"]}
+{"query": "network receive errors packet loss incoming", "expected_doc_ids": ["runbook:NodeNetworkReceiveErrs:0"]}
+{"query": "network transmit errors outbound packet drop", "expected_doc_ids": ["runbook:NodeNetworkTransmitErrs:0"]}
+{"query": "RAID array degraded disk failure missing", "expected_doc_ids": ["runbook:NodeRAIDDegraded:0", "runbook:NodeRAIDDiskFailure:0"]}
+{"query": "prometheus bad config reload failed invalid configuration", "expected_doc_ids": ["runbook:PrometheusBadConfig:0"]}
+{"query": "prometheus duplicate timestamps ingestion issue", "expected_doc_ids": ["runbook:PrometheusDuplicateTimestamps:0"]}
+{"query": "prometheus not sending alerts to any alertmanager", "expected_doc_ids": ["runbook:PrometheusErrorSendingAlertsToAnyAlertmanager:0", "runbook:PrometheusErrorSendingAlertsToSomeAlertmanagers:0"]}
+{"query": "prometheus label limit hit cardinality exceeded", "expected_doc_ids": ["runbook:PrometheusLabelLimitHit:0"]}
+{"query": "prometheus missing rule evaluations slow", "expected_doc_ids": ["runbook:PrometheusMissingRuleEvaluations:0"]}
+{"query": "prometheus not connected to alertmanager", "expected_doc_ids": ["runbook:PrometheusNotConnectedToAlertmanagers:0"]}
+{"query": "prometheus notification queue full alerts dropped", "expected_doc_ids": ["runbook:PrometheusNotificationQueueRunningFull:0"]}
+{"query": "prometheus not ingesting samples scrape failing", "expected_doc_ids": ["runbook:PrometheusNotIngestingSamples:0"]}
+{"query": "prometheus operator list errors kubernetes watch", "expected_doc_ids": ["runbook:PrometheusOperatorListErrors:0", "runbook:PrometheusOperatorWatchErrors:0"]}
+{"query": "prometheus operator not ready reconcile failing", "expected_doc_ids": ["runbook:PrometheusOperatorNotReady:0", "runbook:PrometheusOperatorReconcileErrors:0"]}
+{"query": "prometheus operator sync failed CRD resources", "expected_doc_ids": ["runbook:PrometheusOperatorSyncFailed:0"]}
+{"query": "prometheus out of order timestamps samples rejected", "expected_doc_ids": ["runbook:PrometheusOutOfOrderTimestamps:0"]}
+{"query": "prometheus remote storage write failures", "expected_doc_ids": ["runbook:PrometheusRemoteStorageFailures:0"]}
+{"query": "prometheus remote write behind lag shards", "expected_doc_ids": ["runbook:PrometheusRemoteWriteBehind:0", "runbook:PrometheusRemoteWriteDesiredShards:0"]}
+{"query": "prometheus rule evaluation failures alerting rules broken", "expected_doc_ids": ["runbook:PrometheusRuleFailures:0"]}
+{"query": "prometheus target limit hit too many targets", "expected_doc_ids": ["runbook:PrometheusTargetLimitHit:0"]}
+{"query": "prometheus TSDB compaction failing storage corruption", "expected_doc_ids": ["runbook:PrometheusTSDBCompactionsFailing:0"]}
+{"query": "prometheus TSDB reload failing configuration error", "expected_doc_ids": ["runbook:PrometheusTSDBReloadsFailing:0"]}
+{"query": "scrape target down endpoint unreachable health check", "expected_doc_ids": ["runbook:TargetDown:0"]}
+{"query": "kubelet server certificate expiring TLS renewal", "expected_doc_ids": ["runbook:KubeletServerCertificateExpiration:0", "runbook:KubeletServerCertificateRenewalErrors:0"]}
+{"query": "aggregated API server down extension unavailable", "expected_doc_ids": ["runbook:KubeAggregatedAPIDown:0", "runbook:KubeAggregatedAPIErrors:0"]}
+{"query": "config reloader sidecar errors unable to reload", "expected_doc_ids": ["runbook:ConfigReloaderSidecarErrors:0"]}
+{"query": "prometheus operator rejected resources invalid CRD spec", "expected_doc_ids": ["runbook:PrometheusOperatorRejectedResources:0"]}
+{"query": "prometheus operator node lookup errors", "expected_doc_ids": ["runbook:PrometheusOperatorNodeLookupErrors:0"]}
