@@ -44,7 +44,9 @@ def copy_loghub_subset(loghub_path: Path) -> None:
         print(f"Copied {src} → {dst}")
     elif dst.stat().st_size > src.stat().st_size:
         # A larger file (e.g. full Zenodo dataset) was placed here manually — don't overwrite it
-        print(f"Skipping: {dst} ({dst.stat().st_size // 1_000_000}MB) is larger than source ({src.stat().st_size // 1_000_000}MB)")
+        dst_mb = dst.stat().st_size // 1_000_000
+        src_mb = src.stat().st_size // 1_000_000
+        print(f"Skipping: {dst} ({dst_mb}MB) is larger than source ({src_mb}MB)")
     else:
         print(f"Already exists: {dst}")
 

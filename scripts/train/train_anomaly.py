@@ -18,7 +18,14 @@ import mlflow
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import classification_report, f1_score, fbeta_score, precision_recall_curve, precision_score, recall_score
+from sklearn.metrics import (
+    classification_report,
+    f1_score,
+    fbeta_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+)
 from sklearn.model_selection import train_test_split  # noqa: F401 (kept for unsupervised fallback)
 
 FEATURES = os.getenv("FEATURES_PATH", "data/features/features.parquet")
@@ -99,7 +106,10 @@ def main() -> None:
             f"Split — Train: {len(X_train)} ({len(X_train_fit)} normal) | "
             f"Val: {len(X_val)} | Test: {len(X_test)}"
         )
-        contamination = float(CONTAMINATION) if CONTAMINATION != "auto" else min(float(y_train.mean()), 0.5)
+        if CONTAMINATION != "auto":
+            contamination = float(CONTAMINATION)
+        else:
+            contamination = min(float(y_train.mean()), 0.5)
     else:
         print("No labels found — training unsupervised (no F1/precision/recall)")
         X_train = X
