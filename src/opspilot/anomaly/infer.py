@@ -11,9 +11,16 @@ from opspilot.anomaly.features import LogFeaturizer
 
 @lru_cache
 def _load_model():
-    """Load the trained IsolationForest model from disk (cached)."""
+    """Load the trained IsolationForest model from disk (cached).
+
+    train_anomaly.py saves {"model": ..., "threshold": ...}; older
+    artifacts may be a bare model, so unwrap only when it's a dict.
+    """
     path = os.getenv("ANOMALY_MODEL_PATH", "models/anomaly_model.pkl")
-    return joblib.load(path)
+    loaded = joblib.load(path)
+    if isinstance(loaded, dict):
+        return loaded["model"]
+    return loaded
 
 
 @lru_cache
