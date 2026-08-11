@@ -64,8 +64,8 @@ stages:
       size: 2101
     - path: scripts/train/train_anomaly.py
       hash: md5
-      md5: 5df1d733aaec6e0e6e35667308de6e9b
-      size: 1997
+      md5: d09204b762bedaa0daed6624255c602e
+      size: 6051
     params:
       params.yaml:
         anomaly.contamination: 0.01
@@ -73,12 +73,12 @@ stages:
     outs:
     - path: artifacts/train_metrics.json
       hash: md5
-      md5: d5579fe010725aa8d8cd4c5c00e0d98c
-      size: 123
+      md5: 2aa1c90a662ac7da44601437016acf46
+      size: 129
     - path: models/anomaly_model.pkl
       hash: md5
-      md5: bc285ab5efcae9e56eb84662b95c4315
-      size: 169641
+      md5: 1a1192f125fa1b1a0e15521ac1f62f4b
+      size: 169625
   index:
     cmd: python scripts/rag/build_index.py
     deps:
@@ -112,11 +112,11 @@ stages:
       nfiles: 2
     - path: data/eval/rag_gold.jsonl
       hash: md5
-      md5: 4c77a1351fc8bafcb12fa6638d79ba81
-      size: 1659
+      md5: 647f69d57f19cee6c5f2c42927d732d3
+      size: 12149
     - path: scripts/eval/run_eval.py
       hash: md5
-      md5: 5fcca2b8b775be04769fb056911573d0
+      md5: 7c0fd0f3fcd400a56f9d0fe08bee1b25
       size: 2402
     params:
       params.yaml:
@@ -124,5 +124,5 @@ stages:
     outs:
     - path: artifacts/eval_metrics.json
       hash: md5
-      md5: ff3fc0705af4e64b85a77179b4b7c9b3
+      md5: e82855d7cb4de868a201e83f8cf8fcc5
       size: 73

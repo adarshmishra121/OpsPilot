@@ -7,7 +7,7 @@ anomaly:
   window_size: 500
   vocab_size: 300
   n_estimators: 150
-  contamination: 0.01
+  contamination: 0.03
 
 # RAG retrieval
 rag:

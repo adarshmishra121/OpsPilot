@@ -44,3 +44,6 @@ mlruns.db
 # Misc
 *.log
 *.bak
+
+# Vendored binaries
+.bin/
